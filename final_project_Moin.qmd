@@ -150,6 +150,20 @@ rm(pft1, pft2, pft3)
 all_pft <- all_pft %>% rename(seqn = SEQN)
 ```
 
+```{r Load FENO values}
+
+feno1 <- read_xpt(here::here("data/ENX_E.xpt"))
+feno2 <- read_xpt(here::here("data/ENX_F.xpt"))
+feno3 <- read_xpt(here::here("data/ENX_G.xpt"))
+
+all_feno <- bind_rows(feno1, feno2, feno3)
+rm(feno1, feno2, feno3)
+
+all_feno <- all_feno %>% rename(seqn = SEQN)
+
+```
+
+
 ```{r Cohort derivation}
 
 # To identify cohort, we will filter on inclusion criteria (age >=18) and
