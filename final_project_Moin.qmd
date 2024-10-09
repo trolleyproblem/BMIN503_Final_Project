@@ -26,33 +26,43 @@ Explain why your problem is interdisciplinary, what fields can contribute to its
 
 Describe the data used and general methodological approach used to address the problem described in the @sec-introduction. Subsequently, incorporate full R code necessary to retrieve and clean data, and perform analysis. Be sure to include a description of code so that others (including your future self) can understand what you are doing and why.
 
-```{r Load libraries and set working directory and seed}
+```{r Load libraries and set seed}
+#| output: false
 library(tidyverse)
 library(haven)
 library(rspiro)
-
-setwd("~/Dropbox/My Mac (Emily’s MacBook Air)/Documents/Fellowship/MSCE/DataScience/BMIN503_Final_Project")
+library(here)
 
 set.seed(36)
 ```
+
 ```{r Load spirometry data}
-spirometry1 <- read_sas("data/spxraw_e.sas7bdat")
-spirometry2 <- read_sas("data/spxraw_f.sas7bdat")
-spirometry3 <- read_sas("data/spxraw_g.sas7bdat")
+spirometry1 <- read_sas(here::here("data/spxraw_e.sas7bdat"))
+spirometry2 <- read_sas(here::here("data/spxraw_f.sas7bdat"))
+spirometry3 <- read_sas(here::here("data/spxraw_g.sas7bdat"))
 
 all_spirometry <- bind_rows(spirometry1, spirometry2, spirometry3)
 rm(spirometry1,spirometry2,spirometry3)
-```
-```{r Load body measurement data}
-bm1 <- read_xpt("data/BMX_E.XPT") %>% select(SEQN, BMXWT, BMXHT)
-bm2 <- read_xpt("data/BMX_F.XPT") %>% select(SEQN, BMXWT, BMXHT)
-bm3 <- read_xpt("data/BMX_G.XPT") %>% select(SEQN, BMXWT, BMXHT)
 
-all_bm <- bind_rows(bm1, bm2, bm3) %>% rename(seqn = SEQN)
-rm(bm1, bm2, bm3)
+all_spirometry <- all_spirometry %>% rename(seqn = SEQN)
 ```
+
+```{r Load body measurement data}
+bm1 <- read_xpt(here::here("data/BMX_E.XPT")) %>% select(SEQN, BMXWT, BMXHT)
+bm2 <- read_xpt(here::here("data/BMX_F.XPT")) %>% select(SEQN, BMXWT, BMXHT)
+bm3 <- read_xpt(here::here("data/BMX_G.XPT")) %>% select(SEQN, BMXWT, BMXHT)
+
+all_bm <- bind_rows(bm1, bm2, bm3)
+rm(bm1, bm2, bm3)
+
+all_bm <- all_bm %>%
+  rename(seqn = SEQN,
+         wt = BMXWT,
+         ht = BMXHT)
+```
+
 ```{r Load mortality data}
-mort1 <- read_fwf(file="data/NHANES_2007_2008_MORT_2019_PUBLIC.dat",
+mort1 <- read_fwf(file=here::here("data/NHANES_2007_2008_MORT_2019_PUBLIC.dat"),
                 col_types = "iiiiiiii",
                 fwf_cols(seqn = c(1,6),
                          eligstat = c(15,15),
@@ -66,7 +76,7 @@ mort1 <- read_fwf(file="data/NHANES_2007_2008_MORT_2019_PUBLIC.dat",
                 na = c("", ".")
 )
 
-mort2 <- read_fwf(file="data/NHANES_2009_2010_MORT_2019_PUBLIC.dat",
+mort2 <- read_fwf(file=here::here("data/NHANES_2009_2010_MORT_2019_PUBLIC.dat"),
                   col_types = "iiiiiiii",
                   fwf_cols(seqn = c(1,6),
                            eligstat = c(15,15),
@@ -80,7 +90,7 @@ mort2 <- read_fwf(file="data/NHANES_2009_2010_MORT_2019_PUBLIC.dat",
                   na = c("", ".")
 )
 
-mort3 <- read_fwf(file="data/NHANES_2011_2012_MORT_2019_PUBLIC.dat",
+mort3 <- read_fwf(file=here::here("data/NHANES_2011_2012_MORT_2019_PUBLIC.dat"),
                   col_types = "iiiiiiii",
                   fwf_cols(seqn = c(1,6),
                            eligstat = c(15,15),
@@ -97,10 +107,11 @@ mort3 <- read_fwf(file="data/NHANES_2011_2012_MORT_2019_PUBLIC.dat",
 all_mortality <- bind_rows(mort1, mort2, mort3)
 rm(mort1, mort2, mort3)
 ```
+
 ```{r Load demographic data}
-demo1 <- read_xpt("data/DEMO_E.XPT")
-demo2 <- read_xpt("data/DEMO_F.XPT")
-demo3 <- read_xpt("data/DEMO_G.XPT")
+demo1 <- read_xpt(here::here("data/DEMO_E.XPT"))
+demo2 <- read_xpt(here::here("data/DEMO_F.XPT"))
+demo3 <- read_xpt(here::here("data/DEMO_G.XPT"))
 
 # The demographic variables are different across NHANES years
 # so for now I will create a subset with only variables of interest to me
@@ -112,19 +123,41 @@ demo3 <- demo3 %>% select(SEQN, RIDEXAGM, RIDRETH1, RIAGENDR) %>%
 
 all_demo <- bind_rows(demo1, demo2, demo3)
 rm(demo1, demo2, demo3)
+
+all_demo <-
+  all_demo %>% rename(
+  seqn = SEQN,
+  age_months = RIDAGEEX,
+  gender = RIAGENDR,
+  race = RIDRETH1
+)
+
+all_demo <- all_demo %>%
+  mutate(age_years = age_months/12,
+         gender = factor(gender),
+         race = factor(race))
+
 ```
+
 ```{r Load PFT measurements}
-pft1 <- read_xpt("data/SPX_E.xpt")
-pft2 <- read_xpt("data/SPX_F.xpt")
-pft3 <- read_xpt("data/SPX_G.xpt")
+pft1 <- read_xpt(here::here("data/SPX_E.xpt"))
+pft2 <- read_xpt(here::here("data/SPX_F.xpt"))
+pft3 <- read_xpt(here::here("data/SPX_G.xpt"))
 
 all_pft <- bind_rows(pft1, pft2, pft3)
 rm(pft1, pft2, pft3)
+
+all_pft <- all_pft %>% rename(seqn = SEQN)
 ```
-```{r Rename variables}
+
+```{r Join tables for further data cleaning}
+
+all_spirometry <- 
+  all_spirometry %>%
+  left_join(all_demo, by = "seqn") %>%
+  filter(age_years >= 18)
 
 ```
-
 
 ## Results {#sec-results}
 
