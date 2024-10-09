@@ -150,12 +150,144 @@ rm(pft1, pft2, pft3)
 all_pft <- all_pft %>% rename(seqn = SEQN)
 ```
 
-```{r Join tables for further data cleaning}
+```{r Cohort derivation}
+
+# To identify cohort, we will filter on inclusion criteria (age >=18) and
+# clean raw spirometry samples - remaining patient IDs will then be
+# used to filter all other tables
+
+# Store number of patients at every step of filtering for future study
+# flowchart
+update_patient_list <- function(included, step, n) {
+  
+  included <- included %>% add_row(
+    step = step,
+    included_n = n
+  )
+  
+  return(included)
+  
+}
+
+included_patients <- tibble(
+  step = "initial",
+  included_n = all_spirometry %>% count(seqn) %>% nrow()
+)
+
+# Exclude children
 
 all_spirometry <- 
   all_spirometry %>%
   left_join(all_demo, by = "seqn") %>%
   filter(age_years >= 18)
+
+included_patients <- 
+  update_patient_list(included_patients,
+                      "age >= 18", all_spirometry %>% count(seqn) %>% nrow())
+
+# Exclude maneuvers unacceptable by ATS criteria
+
+all_spirometry <-
+  all_spirometry %>%
+  filter(SPAACC=="Y")
+
+included_patients <- 
+  update_patient_list(included_patients,
+                      "acceptable by ATS", all_spirometry %>% count(seqn) %>% nrow())
+
+# Exclude maneuvers that are "too short"
+# How short is too short?
+
+# Visualize distribution of curve length
+# Recall 1 point = 0.01 sec
+
+all_spirometry %>%
+  ggplot(aes(x=SPXPTS)) + geom_histogram(binwidth=10)
+
+all_spirometry %>%
+  filter(SPXPTS < 250) %>%
+  ggplot(aes(x=SPXPTS)) + geom_histogram(binwidth=1)
+
+# There's a clear cutoff at 150 (1.5 seconds) - for now, we'll use that
+# as our minimum length
+
+all_spirometry <-
+  all_spirometry %>%
+  filter(SPXPTS >=150)
+
+included_patients <- 
+  update_patient_list(included_patients,
+                      "at least 1.5 sec", all_spirometry %>% count(seqn) %>% nrow())
+
+# Examinee effort - from clinical experience, both A and B are informative,
+# but we'll exclude C
+
+all_spirometry <-
+  all_spirometry %>%
+  filter(SPAQEFF=="A" | SPAQEFF=="B")
+
+included_patients <- 
+  update_patient_list(included_patients,
+                      "A or B effort", all_spirometry %>% count(seqn) %>% nrow())
+
+# Exclude post bronchodilator curves for now
+
+all_spirometry <-
+  all_spirometry %>%
+  filter(SPATTYPE=="Pre")
+
+# Note - it may seem non-intuitive that this would reduce the n, however
+# patients who are dropped at this step had pre-bronchodilator curves that were
+# already filtered for other quality reasons
+included_patients <- 
+  update_patient_list(included_patients,
+                      "exclude BD testing", all_spirometry %>% count(seqn) %>% nrow())
+
+# For simplicity and to avoid accounting for clustering in analyses, will limit to
+# one curve per patient. Will choose patient's "best" curve based on criteria:
+# 1. A effort if available
+# 2. Plateau achieved if available
+# 3. Length closer to median length
+
+median_length <- median(all_spirometry$SPXPTS)
+
+all_spirometry <-
+  all_spirometry %>% 
+  mutate(order_by_length = abs(SPXPTS - median_length)) %>%
+  mutate(order_by_effort = case_when(
+    SPAQEFF=="A" ~ 0,
+    SPAQEFF=="B" ~ 1
+  )) %>%
+  mutate(order_by_plateau = case_when(
+    SPAPLAT=="Y" ~ 0,
+    SPAPLAT=="N" ~ 1
+  )) %>%
+  arrange(seqn,order_by_effort, order_by_plateau, order_by_length) %>%
+  group_by(seqn) %>%
+  filter(row_number()==1) %>%
+  select(-order_by_effort, -order_by_plateau, -order_by_length) %>%
+  ungroup()
+
+```
+```{r}
+# Prep data for export to Python
+
+# Sample size is large, so rather than 80/20 training/validation split we will
+# use a fixed validation sample of 1000 curves and export separate files
+
+validation_set <-
+  all_spirometry %>%
+  slice_sample(n = 1000, replace = FALSE) %>%
+  select(seqn, SPXRAW, gender) %>%
+  write_csv(here::here("data/validation_set.csv"))
+
+training_set <-
+  all_spirometry %>%
+  filter(!(seqn %in% validation_set$seqn)) %>%
+  select(seqn, SPXRAW, gender) %>%
+  write_csv(here::here("data/training_set.csv"))
+
+
 
 ```
 
