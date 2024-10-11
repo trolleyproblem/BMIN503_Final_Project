@@ -289,17 +289,9 @@ all_spirometry <-
 # Sample size is large, so rather than 80/20 training/validation split we will
 # use a fixed validation sample of 1000 curves and export separate files
 
-validation_set <-
-  all_spirometry %>%
-  slice_sample(n = 1000, replace = FALSE) %>%
+all_spirometry %>%
   select(seqn, SPXRAW, gender) %>%
-  write_csv(here::here("data/validation_set.csv"))
-
-training_set <-
-  all_spirometry %>%
-  filter(!(seqn %in% validation_set$seqn)) %>%
-  select(seqn, SPXRAW, gender) %>%
-  write_csv(here::here("data/training_set.csv"))
+  write_csv(here::here("data/complete_data.csv"))
 
 
 
