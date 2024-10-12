@@ -163,6 +163,22 @@ all_feno <- all_feno %>% rename(seqn = SEQN)
 
 ```
 
+```{r Load medical questionnaires}
+
+mcq1 <- read_xpt(here::here("data/MCQ_E.xpt")) %>%
+  select(SEQN, MCQ010)
+mcq2 <- read_xpt(here::here("data/MCQ_F.xpt")) %>%
+  select(SEQN, MCQ010)
+mcq3 <- read_xpt(here::here("data/MCQ_G.xpt")) %>%
+  select(SEQN, MCQ010)
+
+all_mcq <- bind_rows(mcq1, mcq2, mcq3)
+rm(mcq1, mcq2, mcq3)
+
+all_mcq <- all_mcq %>% rename(seqn = SEQN, ever_asthma = MCQ010)
+
+```
+
 
 ```{r Cohort derivation}
 
@@ -286,14 +302,67 @@ all_spirometry <-
 ```{r}
 # Prep data for export to Python
 
-# Sample size is large, so rather than 80/20 training/validation split we will
-# use a fixed validation sample of 1000 curves and export separate files
-
 all_spirometry %>%
   select(seqn, SPXRAW, gender) %>%
   write_csv(here::here("data/complete_data.csv"))
 
+all_spirometry %>%
+  left_join(all_mcq, by = "seqn") %>%
+  filter(ever_asthma==1 | ever_asthma==2) %>%
+  write_csv(here::here("data/complete_asthma.csv"))
 
+```
+```{r Regression modeling}
+
+regression_data <- 
+  all_spirometry %>% left_join(all_pft, by = "seqn") %>%
+  left_join(all_mortality, by = "seqn") %>%
+  select(seqn, gender, age_months, SPXNFEV1, SPXNFVC, SPXNF257, race,
+         mortstat) %>%
+  rename(fev1 = SPXNFEV1,
+         fvc = SPXNFVC,
+         fef257 = SPXNF257) %>%
+  mutate(race = factor(race)) %>%
+  mutate(gender = case_when(
+    gender==1 ~ 0,
+    gender==2 ~ 1
+  )) %>%
+  mutate(gender = factor(gender)) %>%
+  mutate(mortstat = factor(mortstat))
+
+regression_data <- regression_data %>%
+  mutate(assignment = rbinom(nrow(regression_data),1,0.8))
+
+train_data <- filter(regression_data, assignment==1)
+val_data <- filter(regression_data, assignment==0)
+
+m0 <- gam(gender ~ s(fev1, bs="cr") + s(fvc, bs="cr") +
+            s(age_months, bs="cr"),
+          data = train_data,
+          family = "binomial")
+
+summary(m0)
+
+predictions <- 
+  predict.gam(
+    m0,
+    newdata = val_data,
+    type = "response"
+  ) %>%
+  tibble()
+
+predictions <-
+  bind_cols(predictions, val_data) %>%
+  rename_with(~ "prediction", 1) %>%
+  mutate(prediction = case_when(
+    prediction > 0.5 ~ "1",
+    prediction <= 0.5 ~ "0"
+  )) %>%
+  filter(!is.na(gender) & !is.na(prediction)) %>%
+  mutate(accurate = gender==prediction)
+
+predictions %>%
+  summarise(sum(accurate)/n())
 
 ```
 
