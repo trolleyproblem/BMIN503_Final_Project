@@ -1,0 +1,23 @@
+---
+title: "Deep Learning for Spirometry"
+subtitle: "BMIN503/EPID600 Final Project"
+author: "Emily Moin"
+format: html
+editor: visual
+number-sections: true
+embed-resources: true
+---
+
+------------------------------------------------------------------------
+
+Use this template to complete your project throughout the course. Your Final Project presentation will be based on the contents of this document. Replace the title/name above and text below with your own, but keep the headers. Feel free to change the theme and other display settings, although this is not required.
+
+## Overview {#sec-overview}
+
+Spirometry is a mainstay of diagnosis and monitoring for many pulmonary diseases. Although spirometry encodes a large amount of data with thousands of data points per patient, it is typically interpreted only via a small number of conventional measurements (e.g., forced vital capacity [FVC]) and, less commonly, subjective evaluation of the flow-volume loop. By leveraging the spirometry data in the National Health and Nutrition Examination Survey (NHANES), we can develop a proof-of-concept deep learning model to motivate development and inference at larger scale.
+
+## Introduction {#sec-introduction}
+
+As compared to other fields of medicine, pulmonary disease is often more subjective and less algorithmic in its approach to disease diagnosis and monitoring. Although this can be beneficial at times as expert clinicians may leverage "gestalt" judgments for patients' benefit, it also has significant downsides. Among them: the range of individual clinician expertise across a broad swath of uncommon pulmonary diseases can lead to delays in diagnosis and appropriate treatment; ambiguity in disease definitions can make it difficult to appropriately define and recruit populations for clinical trials; and reliance on late manifestations of disease for diagnosis -- like marked reductions in exercise capacity, grossly abnormal pulmonary function tests, and parenchymal changes detectable at the resolution of CT scans -- may shorten the window in which patients can benefit from disease-modifying therapies.
+
+One area for potential advancement in addressing these issues is interpretation of spirometry. Spirometry is one component of "pulmonary function testing" (PFT), an array of tests in which patients actively participate in breathing maneuvers to elicit measurements of pulmonary function and behavior. In spirometry, patients are coached to maximally inhale and then forcefully exhale while the resulting air flow is measured. Although these maneuvers yield a time-series of flow measurements with thousands of data points, a typical PFT report summarizes spirometry into only a few discrete measurements. We hypothesize that there is more meaningful information about pulmonary function and disease encoded into these rich quantitative data sets than is captured by current, conventional pulmonary function measurements. By developing a deep learning model to interpret waveform spirometry data as collected in the National Health and Nutrition Examination Survey (NHANES), we will leverage techniques from machine learning and computer science; methods of inference from biostatistics and epidemiology to assess the model's performance; and domain specific knowledge from pulmonary medicine to ensure the model is fit for purpose and identify next steps in discovery. Although the NHANES cohort is relatively small, demonstrating that a model trained on these data can glean clinically relevant data will provide the motivation for future inquiries training and externally validating in larger data sets.
