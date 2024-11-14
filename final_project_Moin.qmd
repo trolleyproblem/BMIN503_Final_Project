@@ -32,6 +32,14 @@ library(tidyverse)
 library(haven)
 library(rspiro)
 library(here)
+library(mgcv)
+library(pROC)
+library(tidymodels)
+library(tableone)
+library(boot)
+
+source("scripts/compare_model_performance.R")
+source("scripts/compare_SPINC_performance.R")
 
 set.seed(36)
 ```
@@ -59,6 +67,19 @@ all_bm <- all_bm %>%
   rename(seqn = SEQN,
          wt = BMXWT,
          ht = BMXHT)
+```
+
+```{r Load CBC data}
+cbc1 <- read_xpt(here::here("data/CBC_E.XPT")) %>% select(SEQN, LBDEONO)
+cbc2 <- read_xpt(here::here("data/CBC_F.XPT")) %>% select(SEQN, LBDEONO)
+cbc3 <- read_xpt(here::here("data/CBC_G.XPT")) %>% select(SEQN, LBDEONO)
+
+all_cbc <- bind_rows(cbc1, cbc2, cbc3)
+rm(cbc1, cbc2, cbc3)
+
+all_cbc <- all_cbc %>%
+  rename(seqn = SEQN,
+         aec = LBDEONO)
 ```
 
 ```{r Load mortality data}
@@ -106,6 +127,31 @@ mort3 <- read_fwf(file=here::here("data/NHANES_2011_2012_MORT_2019_PUBLIC.dat"),
 
 all_mortality <- bind_rows(mort1, mort2, mort3)
 rm(mort1, mort2, mort3)
+
+# Filter data so that we can call it 10-year mortality despite
+# different lengths of follow up
+
+# Possible cases: 
+# - Dead with more than 120 months of follow up
+#     EXCLUDE - no way of knowing if alive or dead at 120 months
+# - Alive with more than 120 months of follow up
+#     INCLUDE - known to be alive at 120 months
+# - Dead with less than 120 months of follow up
+#     INCLUDE - known to be dead at 120 months
+# - Alive with less than 120 months of follow up
+#     INCLUDE - introduces right censoring, but not prohibitively 'wrong'
+#     Also, it appears no one falls into this category!
+
+# Remember mortstat is coded 0 == ALIVE, 1 == DECEASED
+
+all_mortality <-
+  all_mortality %>%
+  filter(!(mortstat==1 & permth_exm > 120) |
+           mortstat==0 & permth_exm > 120 |
+           mortstat==1 & permth_exm <= 120 |
+           mortstat==0 & permth_exm <= 120
+  )
+
 ```
 
 ```{r Load demographic data}
@@ -147,7 +193,14 @@ pft3 <- read_xpt(here::here("data/SPX_G.xpt"))
 all_pft <- bind_rows(pft1, pft2, pft3)
 rm(pft1, pft2, pft3)
 
-all_pft <- all_pft %>% rename(seqn = SEQN)
+all_pft <- 
+  all_pft %>% 
+  rename(seqn = SEQN) %>%
+  rename(fev1 = SPXNFEV1,
+         fvc = SPXNFVC,
+         fef257 = SPXNF257,
+         pef = SPXNPEF) %>%
+  mutate(f_ratio = fev1/fvc)
 ```
 
 ```{r Load FENO values}
@@ -166,19 +219,79 @@ all_feno <- all_feno %>% rename(seqn = SEQN)
 ```{r Load medical questionnaires}
 
 mcq1 <- read_xpt(here::here("data/MCQ_E.xpt")) %>%
-  select(SEQN, MCQ010)
+  select(SEQN, MCQ010, MCQ035, MCQ300B, MCQ160G, MCQ160K)
 mcq2 <- read_xpt(here::here("data/MCQ_F.xpt")) %>%
-  select(SEQN, MCQ010)
+  select(SEQN, MCQ010, MCQ035, MCQ300B, MCQ160G, MCQ160K)
 mcq3 <- read_xpt(here::here("data/MCQ_G.xpt")) %>%
-  select(SEQN, MCQ010)
+  select(SEQN, MCQ010, MCQ035, MCQ300B, MCQ160G, MCQ160K)
 
 all_mcq <- bind_rows(mcq1, mcq2, mcq3)
 rm(mcq1, mcq2, mcq3)
 
-all_mcq <- all_mcq %>% rename(seqn = SEQN, ever_asthma = MCQ010)
+all_mcq <- all_mcq %>% rename(seqn = SEQN, 
+                              ever_asthma = MCQ010,
+                              still_asthma = MCQ035,
+                              family_asthma = MCQ300B,
+                              ever_emphysema = MCQ160G,
+                              ever_bronchitis = MCQ160K)
 
 ```
 
+```{r Calculate bronchodilator responsiveness}
+
+# Now to perform the laborious task of generating
+# predicted spirometry values
+# so that I can measure BD responsiveness
+
+# This has to be performed before cohort ascertainment
+# because we will discard post-bronchodilator curves during
+# cohort development
+
+# pred_GLI takes age in years, height in m,
+# and gender as 1=male 2=female (c/w NHANES)
+
+bd_response <- 
+  all_pft %>% 
+  left_join(all_demo, by = "seqn") %>%
+  left_join(all_bm, by = "seqn") %>%
+  filter(SPXBSTAT==1) %>% # Filter on those who performed BD testing
+  filter(age_years >= 18) %>%
+  select(seqn, fev1, fvc, SPXBFEV1, SPXBFVC ,age_years, gender, race, ht) %>%
+  mutate(ht = ht/100) %>% # Convert height to meters
+  mutate(fev1 = fev1/1000) %>% # Convert to L
+  mutate(fvc = fvc/1000) %>% # Convert to L
+  rename(fev1_post = SPXBFEV1) %>%
+  mutate(fev1_post = fev1_post/1000) %>%
+  rename(fvc_post = SPXBFVC) %>%
+  mutate(fvc_post = fvc_post/1000) %>%
+  mutate(fev1_pred =
+           pred_GLIgl(age_years,
+                    ht,
+                    gender,
+                    param = "FEV1")) %>%
+  mutate(fvc_pred =
+           pred_GLIgl(age_years,
+                    ht,
+                    gender,
+                    param = "FVC")) %>%
+  # Apply 2021 BD-response guidelines - increase by 10 percentage points
+  # in percent predicted of either FEV1 or FVC
+  mutate(fev1_change = (fev1_post/fev1_pred) - (fev1/fev1_pred),
+         fvc_change = (fvc_post/fvc_pred) - (fvc/fvc_pred),
+         bd_response = case_when(
+           fev1_change >= 0.1 ~ TRUE,
+           fvc_change >= 0.1 ~ TRUE,
+           .default = FALSE
+         )
+  ) %>%
+  # Drop redundant variables to ease joining later
+  select(-fev1, -fvc, -age_years, -gender, -race, -ht)
+
+# Since bd_response contains only records where BD response was measured,
+# we can inner join this later to our filtered set to ensure only appropriate
+# patients are included
+
+```
 
 ```{r Cohort derivation}
 
@@ -299,6 +412,7 @@ all_spirometry <-
   ungroup()
 
 ```
+
 ```{r}
 # Prep data for export to Python
 
@@ -311,7 +425,682 @@ all_spirometry %>%
   filter(ever_asthma==1 | ever_asthma==2) %>%
   write_csv(here::here("data/complete_asthma.csv"))
 
+# File for VAE to include:
+# Age, months
+# Gender
+# Height
+# FEV1
+# FVC
+# Raw spiro
+
+all_spirometry %>%
+  left_join(all_pft, by = "seqn") %>%
+  left_join(all_bm, by = "seqn") %>%
+  select(seqn, SPXRAW, age_months, gender,
+         ht, fev1, fvc) %>%
+  filter(if_all(everything(), ~ !is.na(.))) %>%
+  write_csv(here::here("data/complete_vae.csv"))
+
+# File for VAE to include:
+# FEV1, FVC, FEV1/FVC, FEF25-75, PEF
+
+vae_data <-
+  all_spirometry %>%
+  left_join(all_pft, by = "seqn") %>%
+  select(seqn, SPXRAW, fev1, fvc, f_ratio, fef257, pef) %>%
+  drop_na() %>%
+  write_csv(here::here("data/complete_vae_pft.csv"))
+
+# File for resnet regression
+
+resnet_regression_data <-
+  all_spirometry %>%
+  left_join(all_pft, by = "seqn") %>%
+  left_join(all_cbc, by = "seqn") %>%
+  select(seqn, SPXRAW, aec, fev1, fvc, f_ratio, fef257, pef) %>%
+  drop_na() %>%
+  write_csv(here::here("data/complete_resnet_aec.csv"))
+
+
+
 ```
+
+```{r Generate Table 1 description of participants in VAE dataset}
+
+# this is a really rough hack job for ATS abstract
+# make it pretty later
+
+vae_data %>%
+  select(seqn) %>%
+  left_join(all_demo) %>%
+  mutate(age_years = floor(age_years)) %>%
+  count()
+
+
+```
+
+```{r}
+# Outcomes I can use PFT measurements to predict
+# 1. Mortality
+# 2. FENO (binary cut off or normalized continuous value)
+# 3. Bronchodilator responsiveness
+# 4. Asthma history
+# 5. AEC count (binary cut off or normalized continuous value)
+
+mu_file_path <- "data/mu_values_model_12.csv"
+
+mu_values <- read_csv(here::here(mu_file_path), show_col_types = FALSE)
+```
+
+```{r Correlation of mu with EDF}
+
+mu_table <-
+  vae_data %>%
+  left_join(mu_values, by = "seqn") %>%
+  select(seqn, fev1, fvc, f_ratio, fef257, pef, any_of(starts_with("mu_"))) %>%
+  drop_na()
+
+mu_table %>%
+  select(any_of(starts_with("mu_")), fev1, fvc, f_ratio, fef257, pef) %>%
+  cov() %>%
+  cov2cor()
+
+```
+
+```{r fafo}
+
+regression_data <- 
+  vae_data %>%
+  left_join(mu_values, by = "seqn") %>%
+  left_join(bd_response, by = "seqn") %>%
+  select(seqn, fev1, fvc, f_ratio, fef257, pef, 
+         bd_response,
+         training_sample,
+         any_of(starts_with("mu_"))) %>%
+  drop_na() %>%
+  mutate(outcome = as.numeric(bd_response))
+
+regression_data_train <-
+  regression_data %>%
+  filter(training_sample==1)
+
+regression_data_val <-
+  regression_data %>%
+  filter(training_sample==1)
+
+m0 <-
+  glm(
+    outcome ~ fev1 + fvc + f_ratio + fef257 + pef,
+    data = regression_data_train,
+    family = "binomial"
+  )
+
+m1 <-
+  glm(
+    outcome ~
+      mu_1 + mu_2 + mu_3 + mu_4 + mu_5,
+    data = regression_data_train,
+    family = "binomial"
+  )
+
+m0_predictions <- predict(m0, newdata = regression_data_val, type = "response")
+m0_obs_pred <- tibble(
+  obs = regression_data_val$outcome,
+  pred = m0_predictions
+)
+
+m1_predictions <- predict(m1, newdata = regression_data_val, type = "response")
+m1_obs_pred <- tibble(
+  obs = regression_data_val$outcome,
+  pred = m1_predictions
+)
+
+sbs_m0 <- scaled_brier_score(m0_obs_pred$obs, m0_obs_pred$pred)
+sbs_m1 <- scaled_brier_score(m1_obs_pred$obs, m1_obs_pred$pred)
+
+print(paste0(
+  "Conventional SBS: ", sbs_m0, "; ",
+  "Deep learning SBS: ", sbs_m1, "."
+))
+
+boot_data <- bind_cols(m0_obs_pred, m1_obs_pred,
+                       .name_repair = "universal") %>%
+  rename(obs = obs...1,
+         pred_m0 = pred...2,
+         pred_m1 = pred...4) %>%
+  select(obs, pred_m0, pred_m1)
+
+  # Function to calculate the difference in Brier Scores
+  brier_diff <- function(data, indices) {
+    sampled_data <- data[indices, ]
+    
+    brier_base <- scaled_brier_score(sampled_data$obs, sampled_data$pred_m0)
+    brier_mu <- scaled_brier_score(sampled_data$obs, sampled_data$pred_m1)
+    
+    diff <- brier_mu - brier_base
+    if (is.na(diff)) diff <- 0  # Handle NA gracefully
+    
+    return(diff)
+    
+  }
+  
+  # Bootstrap the Brier Score difference with 1000 replications
+  set.seed(42)
+  boot_result <- boot(boot_data, statistic = brier_diff, R = 1000)
+  
+  # Calculate confidence interval for the difference
+  boot_ci <- boot.ci(boot_result, type = "norm")
+  
+  # Print results
+  print(boot_result)
+  print(boot_ci)
+
+```
+
+```{r}
+
+regression_data <- 
+  vae_data %>%
+  left_join(mu_values, by = "seqn") %>%
+  left_join(all_cbc, by = "seqn") %>%
+  select(seqn, fev1, fvc, f_ratio, fef257, pef, 
+         aec,
+         training_sample,
+         any_of(starts_with("mu_"))) %>%
+  drop_na() %>%
+  rename(outcome = aec)
+
+regression_data_train <-
+  regression_data %>%
+  filter(training_sample==1)
+
+regression_data_val <-
+  regression_data %>%
+  filter(training_sample==1)
+
+m0 <-
+  lm(
+    outcome ~ fev1 + fvc + f_ratio + fef257 + pef,
+    data = regression_data_train
+  )
+
+m1 <-
+  lm(
+    outcome ~
+      mu_1 + mu_2 + mu_3 + mu_4 + mu_5,
+    data = regression_data_train
+  )
+
+m0_predictions <- predict(m0, newdata = regression_data_val)
+m0_obs_pred <- tibble(
+  obs = regression_data_val$outcome,
+  pred = m0_predictions
+)
+
+m1_predictions <- predict(m1, newdata = regression_data_val)
+m1_obs_pred <- tibble(
+  obs = regression_data_val$outcome,
+  pred = m1_predictions
+)
+
+sbs_m0 <- scaled_brier_score(m0_obs_pred$obs, m0_obs_pred$pred)
+sbs_m1 <- scaled_brier_score(m1_obs_pred$obs, m1_obs_pred$pred)
+
+print(paste0(
+  "Conventional SBS: ", sbs_m0, "; ",
+  "Deep learning SBS: ", sbs_m1, "."
+))
+
+boot_data <- bind_cols(m0_obs_pred, m1_obs_pred,
+                       .name_repair = "universal") %>%
+  rename(obs = obs...1,
+         pred_m0 = pred...2,
+         pred_m1 = pred...4) %>%
+  select(obs, pred_m0, pred_m1)
+
+  # Function to calculate the difference in Brier Scores
+  brier_diff <- function(data, indices) {
+    sampled_data <- data[indices, ]
+    
+    brier_base <- scaled_brier_score(sampled_data$obs, sampled_data$pred_m0)
+    brier_mu <- scaled_brier_score(sampled_data$obs, sampled_data$pred_m1)
+    
+    diff <- brier_mu - brier_base
+    if (is.na(diff)) diff <- 0  # Handle NA gracefully
+    
+    return(diff)
+    
+  }
+  
+  # Bootstrap the Brier Score difference with 1000 replications
+  set.seed(42)
+  boot_result <- boot(boot_data, statistic = brier_diff, R = 1000)
+  
+  # Calculate confidence interval for the difference
+  boot_ci <- boot.ci(boot_result, type = "norm")
+  
+  # Print results
+  print(boot_result)
+  print(boot_ci)
+
+```
+
+```{r Mortality}
+
+regression_data <- 
+  vae_data %>%
+  left_join(all_mortality, by = "seqn") %>%
+  left_join(mu_values, by = "seqn") %>%
+  select(seqn, fev1, fvc, f_ratio, fef257, pef, mortstat, mu_1, mu_2) %>%
+  drop_na() %>%
+  mutate(mortstat = factor(mortstat)) %>%
+  mutate(outcome = mortstat)
+
+compare_model_performance(regression_data, "Mortality")
+
+regression_data <- 
+  vae_data %>%
+  left_join(all_mortality, by = "seqn") %>%
+  left_join(mu_values, by = "seqn") %>%
+  select(seqn, fev1, fvc, f_ratio, fef257, pef, mortstat, 
+         any_of(starts_with("mu_"))) %>%
+  drop_na() %>%
+  mutate(mortstat = factor(mortstat)) %>%
+  mutate(outcome = mortstat)
+
+compare_SPINC_performance(regression_data, "Mortality")
+```
+
+```{r FENO}
+
+regression_data <- 
+  vae_data %>%
+  left_join(all_feno, by = "seqn") %>%
+  left_join(mu_values, by = "seqn") %>%
+  mutate(feno_neg = case_when(
+    ENXMEAN < 25 ~ 1,
+    ENXMEAN >= 25 ~ 0
+  )) %>%
+  mutate(feno_neg = factor(feno_neg)) %>%
+  select(seqn, fev1, fvc, f_ratio, fef257, pef,
+         any_of(starts_with("mu_")), feno_neg) %>%
+  drop_na() %>%
+  mutate(outcome = feno_neg)
+
+compare_model_performance(regression_data, "FENO < 25")
+
+compare_SPINC_performance(regression_data, "FENO < 25")
+
+```
+
+```{r Bronchodilator response}
+
+regression_data <- 
+  vae_data %>%
+  left_join(bd_response, by = "seqn") %>%
+  left_join(mu_values, by = "seqn") %>%
+  select(seqn, fev1, fvc, f_ratio, fef257, pef, any_of(starts_with("mu_")), bd_response) %>%
+  mutate(bd_response = factor(bd_response)) %>%
+  drop_na() %>%
+  mutate(outcome = bd_response)
+
+compare_model_performance(regression_data, "Bronchodilator response")
+
+compare_SPINC_performance(regression_data, "Bronchodilator response")
+
+```
+
+```{r Asthma history}
+
+# Ever asthma
+
+regression_data <- 
+  vae_data %>%
+  left_join(all_mcq, by = "seqn") %>%
+  left_join(mu_values, by = "seqn") %>%
+  filter(ever_asthma != 9) %>%
+  mutate(ever_asthma = factor(ever_asthma)) %>%
+  select(seqn, fev1, fvc, f_ratio, fef257, pef, any_of(starts_with("mu_")), ever_asthma) %>%
+  drop_na() %>%
+  mutate(outcome = ever_asthma)
+
+compare_model_performance(regression_data, "Asthma history (ever)")
+
+compare_SPINC_performance(regression_data, "Asthma history (ever)")
+
+regression_data <- 
+  vae_data %>%
+  left_join(all_mcq, by = "seqn") %>%
+  left_join(mu_values, by = "seqn") %>%
+  filter(family_asthma == 1 | family_asthma == 2) %>%
+  mutate(family_asthma = factor(family_asthma)) %>%
+  select(seqn, fev1, fvc, f_ratio, fef257, pef, mu_1, mu_2, family_asthma) %>%
+  drop_na() %>%
+  mutate(outcome = family_asthma)
+
+compare_model_performance(regression_data, "Family asthma history")
+
+regression_data <- 
+  vae_data %>%
+  left_join(all_mcq, by = "seqn") %>%
+  left_join(mu_values, by = "seqn") %>%
+  filter(still_asthma == 1 | still_asthma == 2) %>%
+  mutate(still_asthma = factor(still_asthma)) %>%
+  select(seqn, fev1, fvc, f_ratio, fef257, pef, mu_1, mu_2, still_asthma) %>%
+  drop_na() %>%
+  mutate(outcome = still_asthma)
+
+compare_model_performance(regression_data, "Asthma history (current)")
+
+
+```
+
+```{r COPD}
+
+regression_data <- 
+  vae_data %>%
+  left_join(all_mcq, by = "seqn") %>%
+  left_join(mu_values, by = "seqn") %>%
+  filter(ever_emphysema == 1 | ever_emphysema == 2) %>%
+  mutate(ever_emphysema = factor(ever_emphysema)) %>%
+  select(seqn, fev1, fvc, f_ratio, fef257, pef, any_of(starts_with("mu_")), ever_emphysema) %>%
+  drop_na() %>%
+  mutate(outcome = ever_emphysema)
+
+compare_model_performance(regression_data, "Emphysema history")
+compare_SPINC_performance(regression_data, "Emphysema history")
+
+regression_data <- 
+  vae_data %>%
+  left_join(all_mcq, by = "seqn") %>%
+  left_join(mu_values, by = "seqn") %>%
+  filter(ever_bronchitis == 1 | ever_bronchitis == 2) %>%
+  mutate(ever_bronchitis = factor(ever_bronchitis)) %>%
+  select(seqn, fev1, fvc, f_ratio, fef257, pef, any_of(starts_with("mu_")), ever_bronchitis) %>%
+  drop_na() %>%
+  mutate(outcome = ever_bronchitis)
+
+compare_model_performance(regression_data, "Chronic bronchitis history")
+compare_SPINC_performance(regression_data, "Chronic bronchitis history")
+
+regression_data <- 
+  vae_data %>%
+  left_join(all_mcq, by = "seqn") %>%
+  left_join(mu_values, by = "seqn") %>%
+  mutate(ever_copd = case_when(
+    ever_emphysema == 1 ~ 1,
+    ever_bronchitis == 1 ~ 1,
+    .default = 0
+  )) %>%
+  mutate(ever_copd = factor(ever_copd)) %>%
+  select(seqn, fev1, fvc, f_ratio, fef257, pef, any_of(starts_with("mu_")), ever_copd) %>%
+  drop_na() %>%
+  mutate(outcome = ever_copd)
+
+compare_model_performance(regression_data, "COPD history")
+compare_SPINC_performance(regression_data, "COPD history")
+
+```
+
+```{r Absolute eosinophil count}
+
+regression_data <- 
+  vae_data %>%
+  left_join(all_cbc, by = "seqn") %>%
+  left_join(mu_values, by = "seqn") %>%
+  mutate(aec_pos = case_when(
+    aec < .200 ~ 1,
+    aec >= .200 ~ 0
+  )) %>%
+  mutate(aec_pos = factor(aec_pos)) %>%
+  drop_na() %>%
+  mutate(outcome = aec_pos)
+
+compare_model_performance(regression_data, "AEC < 200")
+
+compare_SPINC_performance(regression_data, "AEC < 200")
+
+```
+
+```{r Gender?}
+
+regression_data <- 
+  vae_data %>%
+  left_join(all_demo, by = "seqn") %>%
+  left_join(mu_values, by = "seqn") %>%
+  drop_na() %>%
+  mutate(outcome = gender)
+
+compare_model_performance(regression_data, "Gender")
+
+compare_SPINC_performance(regression_data, "Gender")
+
+```
+
+```{r Race?}
+
+regression_data <- 
+  vae_data %>%
+  left_join(all_demo, by = "seqn") %>%
+  left_join(mu_values, by = "seqn") %>%
+  drop_na() %>%
+  mutate(race_bin = case_when(
+    race==3 ~ "White",
+    .default = "Non-white"
+  )) %>%
+  drop_na() %>%
+  mutate(outcome = factor(race_bin))
+
+compare_model_performance(regression_data, "Non-white")
+compare_SPINC_performance(regression_data, "Non-white")
+
+regression_data <- 
+  vae_data %>%
+  left_join(all_demo, by = "seqn") %>%
+  left_join(mu_values, by = "seqn") %>%
+  drop_na() %>%
+  mutate(race_bin = case_when(
+    race==1 | race==2 ~ "Hispanic",
+    .default = "Non-Hispanic"
+  )) %>%
+  mutate(outcome = factor(race_bin))
+
+compare_model_performance(regression_data, "Non-Hispanic race")
+
+regression_data <- 
+  vae_data %>%
+  left_join(all_demo, by = "seqn") %>%
+  left_join(mu_values, by = "seqn") %>%
+  drop_na() %>%
+  mutate(race_bin = case_when(
+    race==4 ~ "Non-Hispanic Black",
+    .default = "White and/or Hispanic"
+  )) %>%
+  mutate(outcome = factor(race_bin))
+
+compare_model_performance(regression_data, "Non-Hispanic Black")
+
+```
+
+```{r}
+lr_fit <- 
+  lr_spec |>
+  fit(mortstat ~ fev1 + fvc + f_ratio + fef257 + pef, 
+      data = regression_data)
+
+pred0 <- 
+  bind_cols(
+    truth = regression_data$mortstat,
+    predict(lr_fit, regression_data),
+    predict(lr_fit, regression_data, type = "prob")
+  )
+
+auc0 <- roc_auc(pred0, truth, .pred_0)$.estimate
+
+r0 <- 
+  roc_curve(pred0, truth, .pred_0) %>%
+  mutate(group = "base")
+
+autoplot(roc_curve(pred0, truth, .pred_0))
+
+lr_fit_mu <- 
+  lr_spec |>
+  fit(mortstat ~ fev1 + fvc + f_ratio + fef257 + pef +
+        mu_1 + mu_2, 
+      data = regression_data)
+
+pred1 <- 
+  bind_cols(
+    truth = regression_data$mortstat,
+    predict(lr_fit_mu, regression_data),
+    predict(lr_fit_mu, regression_data, type = "prob")
+  )
+
+auc1 <- roc_auc(pred1, truth, .pred_0)$.estimate
+
+r1 <- 
+  roc_curve(pred1, truth, .pred_0) %>%
+  mutate(group = "mu")
+
+auc_labels <- tibble(
+  group = c("mu","base"),
+  auc = c(auc1, auc0),
+  x = c(0.2, 0.2),
+  y = c(1, 0.9)
+)
+
+bind_rows(r0, r1) %>%
+  ggplot(aes(x = 1 - specificity, y = sensitivity)) +
+  geom_path(aes(color=group)) +
+  geom_abline(lty = 3) +
+  geom_text(data = auc_labels, aes(label = auc, x = x, y = y, color=group)) +
+  coord_equal() +
+  theme_bw()
+
+autoplot(roc_curve(pred1, truth, .pred_0))
+
+
+
+```
+
+```{r Read in mu values from VAE}
+
+mu_values <- read_csv(here::here("data/mu_values_08.csv"))
+
+mu_table <-
+  mu_values %>%
+  left_join(all_pft, by = "seqn") %>%
+  left_join(all_mcq, by = "seqn") %>%
+  left_join(all_bm, by = "seqn") %>%
+  left_join(all_feno, by = "seqn") %>%
+  select(seqn, mu_1, mu_2, mu_3,
+         SPXNFEV1, SPXNFVC, 
+         SPXNF257,
+         ever_asthma, ht,
+         ENXMEAN) %>%
+  mutate(ever_asthma = case_when(
+    ever_asthma==1 ~ 1,
+    ever_asthma==2 ~ 0
+  )) %>%
+  mutate(ever_asthma = factor(ever_asthma)) %>%
+  filter(ever_asthma==0 | ever_asthma==1) %>%
+  filter(!is.na(ENXMEAN)) %>%
+  mutate(feno = case_when(
+    ENXMEAN >= 25 ~ 1,
+    ENXMEAN < 25 ~ 0
+  )) %>%
+  rename(fev1 = SPXNFEV1,
+         fvc = SPXNFVC,
+         fef257 = SPXNF257) %>%
+  left_join(all_demo, by = "seqn") %>%
+  left_join(all_mortality, by = "seqn") %>%
+  mutate(race = factor(race),
+         gender = factor(gender),
+         mortstat = factor(mortstat),
+         feno = factor(feno)) %>%
+  filter(!is.na(mortstat)) %>%
+  mutate(f_ratio = fev1/fvc)
+
+set.seed(42)
+mu_table <- mu_table %>%
+  mutate(assignment = rbinom(nrow(mu_table),1,0.8))
+
+mu_table %>%
+  select(mu_1, mu_2, mu_3, fev1, fvc) %>%
+  cov() %>%
+  cov2cor()
+
+train_data <- filter(mu_table, assignment==1)
+val_data <- filter(mu_table, assignment==0)
+
+# m0 <- gam(mortstat ~ s(fev1, bs="cr") + s(fvc, bs="cr") +
+#             s(age_months, bs="cr") + s(f_ratio, bs="cr") +
+#             s(ht, bs="cr"),
+#           data = train_data,
+#           family = "binomial")
+
+m0 <- gam(mortstat ~ fev1 + fvc + f_ratio + fef257,
+          data = train_data,
+          family = "binomial")
+
+summary(m0)
+
+m1 <- gam(mortstat ~ 
+            fev1 
+          + fvc 
+          + f_ratio 
+          + fef257
+            + mu_1
+            + mu_2
+            + mu_3
+          ,
+          data = train_data,
+          family = "binomial")
+
+summary(m1)
+
+m0_predictions <- 
+  predict.gam(
+    m0,
+    newdata = val_data,
+    type = "response"
+  ) %>%
+  tibble()
+
+m0_predictions <-
+  bind_cols(m0_predictions, val_data) %>%
+  rename_with(~ "prediction", 1) %>%
+  filter(!is.na(mortstat) & !is.na(prediction)) %>%
+  mutate(mortstat = factor(mortstat))
+
+m1_predictions <- 
+  predict.gam(
+    m1,
+    newdata = val_data,
+    type = "response"
+  ) %>%
+  tibble()
+
+m1_predictions <-
+  bind_cols(m1_predictions, val_data) %>%
+  rename_with(~ "prediction", 1) %>%
+  filter(!is.na(mortstat) & !is.na(prediction)) %>%
+  mutate(mortstat = factor(mortstat))
+
+# ROC
+myRoc_base <- roc(response=m0_predictions$mortstat,
+    predictor=m0_predictions$prediction)
+
+myRoc_vae <- roc(response=m1_predictions$mortstat,
+    predictor=m1_predictions$prediction)
+
+plot(myRoc_vae, col="blue")
+plot(myRoc_base, col="red", add=TRUE)
+
+roc.test(myRoc_base, myRoc_vae)
+
+```
+
 ```{r Regression modeling}
 
 regression_data <- 
