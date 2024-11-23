@@ -14,7 +14,7 @@ Use this template to complete your project throughout the course. Your Final Pro
 
 ## Overview {#sec-overview}
 
-Spirometry is a mainstay of diagnosis and monitoring for many pulmonary diseases. Although spirometry encodes a large amount of data with thousands of data points per patient, it is typically interpreted only via a small number of conventional measurements (e.g., forced vital capacity [FVC]) and, less commonly, subjective evaluation of the flow-volume loop. By leveraging the spirometry data in the National Health and Nutrition Examination Survey (NHANES), we can develop a proof-of-concept deep learning model to motivate development and inference at larger scale.
+Spirometry is a mainstay of diagnosis and monitoring for many pulmonary diseases. Although spirometry encodes a large amount of data with thousands of data points per patient, it is typically interpreted only via a small number of conventional measurements (e.g., forced vital capacity \[FVC\]) and, less commonly, subjective evaluation of the flow-volume loop. By leveraging the spirometry data in the National Health and Nutrition Examination Survey (NHANES), we can develop a proof-of-concept deep learning model to motivate development and inference at larger scale.
 
 ## Introduction {#sec-introduction}
 
@@ -219,11 +219,11 @@ all_feno <- all_feno %>% rename(seqn = SEQN)
 ```{r Load medical questionnaires}
 
 mcq1 <- read_xpt(here::here("data/MCQ_E.xpt")) %>%
-  select(SEQN, MCQ010, MCQ035, MCQ300B, MCQ160G, MCQ160K)
+  select(SEQN, MCQ010, MCQ035, MCQ040, MCQ050, MCQ051, MCQ300B, MCQ160G, MCQ160K)
 mcq2 <- read_xpt(here::here("data/MCQ_F.xpt")) %>%
-  select(SEQN, MCQ010, MCQ035, MCQ300B, MCQ160G, MCQ160K)
+  select(SEQN, MCQ010, MCQ035, MCQ040, MCQ050, MCQ051, MCQ300B, MCQ160G, MCQ160K)
 mcq3 <- read_xpt(here::here("data/MCQ_G.xpt")) %>%
-  select(SEQN, MCQ010, MCQ035, MCQ300B, MCQ160G, MCQ160K)
+  select(SEQN, MCQ010, MCQ035, MCQ040, MCQ050, MCQ051, MCQ300B, MCQ160G, MCQ160K)
 
 all_mcq <- bind_rows(mcq1, mcq2, mcq3)
 rm(mcq1, mcq2, mcq3)
@@ -231,9 +231,19 @@ rm(mcq1, mcq2, mcq3)
 all_mcq <- all_mcq %>% rename(seqn = SEQN, 
                               ever_asthma = MCQ010,
                               still_asthma = MCQ035,
+                              asthma_this_year = MCQ040,
+                              asthma_ed_this_year = MCQ050,
+                              asthma_rx = MCQ051,
                               family_asthma = MCQ300B,
                               ever_emphysema = MCQ160G,
                               ever_bronchitis = MCQ160K)
+
+# Dichotomize values so that 1=Yes and 0=No or missing
+all_mcq <- all_mcq %>%
+  mutate(across(-all_of("seqn"), ~ case_when(
+    . == 1 ~ 1,
+    TRUE ~ 0
+  )))
 
 ```
 
@@ -461,7 +471,30 @@ resnet_regression_data <-
   drop_na() %>%
   write_csv(here::here("data/complete_resnet_aec.csv"))
 
+# File for resnet multioutput regression
 
+resnet_regression_data <-
+  all_spirometry %>%
+  left_join(all_pft, by = "seqn") %>%
+  left_join(all_cbc, by = "seqn") %>%
+  left_join(all_feno, by = "seqn") %>%
+  left_join(all_mcq, by = "seqn") %>%
+  left_join(all_mortality, by = "seqn") %>%
+  left_join(all_bm, by = "seqn") %>%
+  rename(feno = ENXMEAN) %>%
+  select(seqn, SPXRAW, aec, feno, ever_asthma, 
+         still_asthma, asthma_this_year, asthma_ed_this_year,
+         asthma_rx, family_asthma,ever_emphysema, ever_bronchitis,
+         gender, age_months, race, mortstat,
+         ht, wt,
+         fev1, fvc, f_ratio, fef257, pef) %>%
+  drop_na() %>%
+  write_csv(here::here("data/complete_resnet_multi_v2.csv"))
+
+
+resnet_regression_data %>%
+  ggplot(aes(x=fev1, group=factor(ever_asthma))) +
+  geom_density(aes(color=factor(ever_asthma)))
 
 ```
 
