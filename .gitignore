@@ -4,3 +4,7 @@
 .Ruserdata
 Final.Rproj
 /data/
+/scripts/
+final_project*
+!final_project_Moin.qmd
+!final_project_Moin.html

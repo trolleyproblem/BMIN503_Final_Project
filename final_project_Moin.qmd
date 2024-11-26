@@ -1,7 +1,7 @@
 ---
 title: "Deep Learning for Spirometry"
 subtitle: "BMIN503/EPID600 Final Project"
-author: "Emily Moin"
+author: "Emily E. Moin, MD, MBE"
 format: html
 editor: visual
 number-sections: true
@@ -9,8 +9,6 @@ embed-resources: true
 ---
 
 ------------------------------------------------------------------------
-
-Use this template to complete your project throughout the course. Your Final Project presentation will be based on the contents of this document. Replace the title/name above and text below with your own, but keep the headers. Feel free to change the theme and other display settings, although this is not required.
 
 ## Overview {#sec-overview}
 
@@ -24,25 +22,24 @@ One area for potential advancement in addressing these issues is interpretation 
 
 ## Methods {#sec-methods}
 
-Describe the data used and general methodological approach used to address the problem described in the @sec-introduction. Subsequently, incorporate full R code necessary to retrieve and clean data, and perform analysis. Be sure to include a description of code so that others (including your future self) can understand what you are doing and why.
+We used data collected during the NHANES 2007-2008, 2009-2010, and 2011-2012 cohorts. During this period, NHANES participants without exclusion criteria completed spirometry, which is available in the form of raw flow-time data as well as conventional discrete measurements. We supplemented these data with additional NHANES demographic and questionnaire data for the purposes of model training and outcomes.
+
+First, we load relevant packages for data cleaning and analysis.
 
 ```{r Load libraries and set seed}
 #| output: false
 library(tidyverse)
 library(haven)
-library(rspiro)
 library(here)
 library(mgcv)
-library(pROC)
 library(tidymodels)
 library(tableone)
-library(boot)
-
-source("scripts/compare_model_performance.R")
-source("scripts/compare_SPINC_performance.R")
+library(ggsci)
 
 set.seed(36)
 ```
+
+Raw spirometry data from NHANES are available in .sas7bdat files, which are loaded using the read_sas method from the haven package.
 
 ```{r Load spirometry data}
 spirometry1 <- read_sas(here::here("data/spxraw_e.sas7bdat"))
@@ -52,107 +49,10 @@ spirometry3 <- read_sas(here::here("data/spxraw_g.sas7bdat"))
 all_spirometry <- bind_rows(spirometry1, spirometry2, spirometry3)
 rm(spirometry1,spirometry2,spirometry3)
 
-all_spirometry <- all_spirometry %>% rename(seqn = SEQN)
+all_spirometry <- all_spirometry %>% dplyr::rename(seqn = SEQN)
 ```
 
-```{r Load body measurement data}
-bm1 <- read_xpt(here::here("data/BMX_E.XPT")) %>% select(SEQN, BMXWT, BMXHT)
-bm2 <- read_xpt(here::here("data/BMX_F.XPT")) %>% select(SEQN, BMXWT, BMXHT)
-bm3 <- read_xpt(here::here("data/BMX_G.XPT")) %>% select(SEQN, BMXWT, BMXHT)
-
-all_bm <- bind_rows(bm1, bm2, bm3)
-rm(bm1, bm2, bm3)
-
-all_bm <- all_bm %>%
-  rename(seqn = SEQN,
-         wt = BMXWT,
-         ht = BMXHT)
-```
-
-```{r Load CBC data}
-cbc1 <- read_xpt(here::here("data/CBC_E.XPT")) %>% select(SEQN, LBDEONO)
-cbc2 <- read_xpt(here::here("data/CBC_F.XPT")) %>% select(SEQN, LBDEONO)
-cbc3 <- read_xpt(here::here("data/CBC_G.XPT")) %>% select(SEQN, LBDEONO)
-
-all_cbc <- bind_rows(cbc1, cbc2, cbc3)
-rm(cbc1, cbc2, cbc3)
-
-all_cbc <- all_cbc %>%
-  rename(seqn = SEQN,
-         aec = LBDEONO)
-```
-
-```{r Load mortality data}
-mort1 <- read_fwf(file=here::here("data/NHANES_2007_2008_MORT_2019_PUBLIC.dat"),
-                col_types = "iiiiiiii",
-                fwf_cols(seqn = c(1,6),
-                         eligstat = c(15,15),
-                         mortstat = c(16,16),
-                         ucod_leading = c(17,19),
-                         diabetes = c(20,20),
-                         hyperten = c(21,21),
-                         permth_int = c(43,45),
-                         permth_exm = c(46,48)
-                ),
-                na = c("", ".")
-)
-
-mort2 <- read_fwf(file=here::here("data/NHANES_2009_2010_MORT_2019_PUBLIC.dat"),
-                  col_types = "iiiiiiii",
-                  fwf_cols(seqn = c(1,6),
-                           eligstat = c(15,15),
-                           mortstat = c(16,16),
-                           ucod_leading = c(17,19),
-                           diabetes = c(20,20),
-                           hyperten = c(21,21),
-                           permth_int = c(43,45),
-                           permth_exm = c(46,48)
-                  ),
-                  na = c("", ".")
-)
-
-mort3 <- read_fwf(file=here::here("data/NHANES_2011_2012_MORT_2019_PUBLIC.dat"),
-                  col_types = "iiiiiiii",
-                  fwf_cols(seqn = c(1,6),
-                           eligstat = c(15,15),
-                           mortstat = c(16,16),
-                           ucod_leading = c(17,19),
-                           diabetes = c(20,20),
-                           hyperten = c(21,21),
-                           permth_int = c(43,45),
-                           permth_exm = c(46,48)
-                  ),
-                  na = c("", ".")
-)
-
-all_mortality <- bind_rows(mort1, mort2, mort3)
-rm(mort1, mort2, mort3)
-
-# Filter data so that we can call it 10-year mortality despite
-# different lengths of follow up
-
-# Possible cases: 
-# - Dead with more than 120 months of follow up
-#     EXCLUDE - no way of knowing if alive or dead at 120 months
-# - Alive with more than 120 months of follow up
-#     INCLUDE - known to be alive at 120 months
-# - Dead with less than 120 months of follow up
-#     INCLUDE - known to be dead at 120 months
-# - Alive with less than 120 months of follow up
-#     INCLUDE - introduces right censoring, but not prohibitively 'wrong'
-#     Also, it appears no one falls into this category!
-
-# Remember mortstat is coded 0 == ALIVE, 1 == DECEASED
-
-all_mortality <-
-  all_mortality %>%
-  filter(!(mortstat==1 & permth_exm > 120) |
-           mortstat==0 & permth_exm > 120 |
-           mortstat==1 & permth_exm <= 120 |
-           mortstat==0 & permth_exm <= 120
-  )
-
-```
+Additional NHANES data are laoded from relevant .XPT files, cleaned, renamed, and readied for joining.
 
 ```{r Load demographic data}
 demo1 <- read_xpt(here::here("data/DEMO_E.XPT"))
@@ -179,9 +79,19 @@ all_demo <-
 )
 
 all_demo <- all_demo %>%
-  mutate(age_years = age_months/12,
+  mutate(age_years = floor(age_months/12),
          gender = factor(gender),
          race = factor(race))
+
+all_demo <- all_demo %>%
+  mutate(race = factor(race, labels = c("Mexican-American",
+                                        "Other Hispanic",
+                                        "Non-Hispanic White",
+                                        "Non-Hispanic Black",
+                                        "Other Race - Including Multi-Racial")))
+
+all_demo <- all_demo %>%
+  mutate(gender = factor(gender, labels = c("Male","Female")))
 
 ```
 
@@ -201,19 +111,6 @@ all_pft <-
          fef257 = SPXNF257,
          pef = SPXNPEF) %>%
   mutate(f_ratio = fev1/fvc)
-```
-
-```{r Load FENO values}
-
-feno1 <- read_xpt(here::here("data/ENX_E.xpt"))
-feno2 <- read_xpt(here::here("data/ENX_F.xpt"))
-feno3 <- read_xpt(here::here("data/ENX_G.xpt"))
-
-all_feno <- bind_rows(feno1, feno2, feno3)
-rm(feno1, feno2, feno3)
-
-all_feno <- all_feno %>% rename(seqn = SEQN)
-
 ```
 
 ```{r Load medical questionnaires}
@@ -247,61 +144,40 @@ all_mcq <- all_mcq %>%
 
 ```
 
-```{r Calculate bronchodilator responsiveness}
+```{r Load respiratory health questionnaire}
 
-# Now to perform the laborious task of generating
-# predicted spirometry values
-# so that I can measure BD responsiveness
+rh1 <- read_xpt(here::here("data/RDQ_E.xpt")) %>%
+  select(SEQN,RDQ070,RDQ080,RDQ100)
+rh2 <- read_xpt(here::here("data/RDQ_F.xpt")) %>%
+  select(SEQN,RDQ070,RDQ080,RDQ100)
+rh3 <- read_xpt(here::here("data/RDQ_G.xpt")) %>%
+  select(SEQN,RDQ070,RDQ080,RDQ100)
 
-# This has to be performed before cohort ascertainment
-# because we will discard post-bronchodilator curves during
-# cohort development
+all_rh <- bind_rows(rh1, rh2, rh3)
+rm(rh1, rh2, rh3)
 
-# pred_GLI takes age in years, height in m,
-# and gender as 1=male 2=female (c/w NHANES)
+all_rh <- all_rh %>% rename(seqn = SEQN,
+                            wheeze_bin = RDQ070,
+                            wheeze_count = RDQ080,
+                            wheeze_exercise = RDQ100)
 
-bd_response <- 
-  all_pft %>% 
-  left_join(all_demo, by = "seqn") %>%
-  left_join(all_bm, by = "seqn") %>%
-  filter(SPXBSTAT==1) %>% # Filter on those who performed BD testing
-  filter(age_years >= 18) %>%
-  select(seqn, fev1, fvc, SPXBFEV1, SPXBFVC ,age_years, gender, race, ht) %>%
-  mutate(ht = ht/100) %>% # Convert height to meters
-  mutate(fev1 = fev1/1000) %>% # Convert to L
-  mutate(fvc = fvc/1000) %>% # Convert to L
-  rename(fev1_post = SPXBFEV1) %>%
-  mutate(fev1_post = fev1_post/1000) %>%
-  rename(fvc_post = SPXBFVC) %>%
-  mutate(fvc_post = fvc_post/1000) %>%
-  mutate(fev1_pred =
-           pred_GLIgl(age_years,
-                    ht,
-                    gender,
-                    param = "FEV1")) %>%
-  mutate(fvc_pred =
-           pred_GLIgl(age_years,
-                    ht,
-                    gender,
-                    param = "FVC")) %>%
-  # Apply 2021 BD-response guidelines - increase by 10 percentage points
-  # in percent predicted of either FEV1 or FVC
-  mutate(fev1_change = (fev1_post/fev1_pred) - (fev1/fev1_pred),
-         fvc_change = (fvc_post/fvc_pred) - (fvc/fvc_pred),
-         bd_response = case_when(
-           fev1_change >= 0.1 ~ TRUE,
-           fvc_change >= 0.1 ~ TRUE,
-           .default = FALSE
-         )
-  ) %>%
-  # Drop redundant variables to ease joining later
-  select(-fev1, -fvc, -age_years, -gender, -race, -ht)
+# Dichotomize values so that 1=Yes and 0=No or missing
+all_rh <- all_rh %>%
+  mutate(across(c(wheeze_bin, wheeze_exercise), ~ case_when(
+    . == 1 ~ 1,
+    TRUE ~ 0
+  )))
 
-# Since bd_response contains only records where BD response was measured,
-# we can inner join this later to our filtered set to ensure only appropriate
-# patients are included
+# Retain count values and set all other values to 0
+all_rh <- all_rh %>%
+  mutate(wheeze_count = case_when(
+    wheeze_count > 0 & wheeze_count <= 12 ~ wheeze_count,
+    TRUE ~ 0
+  ))
 
 ```
+
+Now that all relevant data are loaded, we can apply inclusion and exclusion criteria to develop our study cohort. We will limit to adult patients (age 18 and over), apply some high-level quality control on the included spirometry curves, and filter our dataset to include only one raw spirometry curve per participant. This step is important because failing to correctly split the cohort between training and validation sets -- i.e., allowing one participant's data to appear in both sets -- would lead to data leakage that could falsely inflate the observed performance of the model. This also spares us from needing to consider clustering when we performance inference. Finally, we drop records where useful variables are missing -- i.e., we will use complete case analysis for this proof-of-concept study design.
 
 ```{r Cohort derivation}
 
@@ -328,870 +204,247 @@ included_patients <- tibble(
 )
 
 # Exclude children
+adult_demo <- all_demo %>%
+  filter(age_years >= 18)
 
 all_spirometry <- 
   all_spirometry %>%
-  left_join(all_demo, by = "seqn") %>%
-  filter(age_years >= 18)
+  filter(seqn %in% adult_demo$seqn)
 
 included_patients <- 
   update_patient_list(included_patients,
                       "age >= 18", all_spirometry %>% count(seqn) %>% nrow())
 
-# Exclude maneuvers unacceptable by ATS criteria
-
-all_spirometry <-
-  all_spirometry %>%
-  filter(SPAACC=="Y")
-
-included_patients <- 
-  update_patient_list(included_patients,
-                      "acceptable by ATS", all_spirometry %>% count(seqn) %>% nrow())
-
 # Exclude maneuvers that are "too short"
-# How short is too short?
-
-# Visualize distribution of curve length
-# Recall 1 point = 0.01 sec
-
-all_spirometry %>%
-  ggplot(aes(x=SPXPTS)) + geom_histogram(binwidth=10)
-
-all_spirometry %>%
-  filter(SPXPTS < 250) %>%
-  ggplot(aes(x=SPXPTS)) + geom_histogram(binwidth=1)
-
-# There's a clear cutoff at 150 (1.5 seconds) - for now, we'll use that
-# as our minimum length
-
+# Based on exploratory analyses, deep learning model performs well
+# with spirometry curves of length 256 (2.56 sec), so exclude samples
+# that are shorter than this
 all_spirometry <-
   all_spirometry %>%
-  filter(SPXPTS >=150)
+  filter(SPXPTS >=256)
 
 included_patients <- 
   update_patient_list(included_patients,
-                      "at least 1.5 sec", all_spirometry %>% count(seqn) %>% nrow())
+                      "at least 2.56 sec", all_spirometry %>% count(seqn) %>% nrow())
 
-# Examinee effort - from clinical experience, both A and B are informative,
-# but we'll exclude C
-
-all_spirometry <-
-  all_spirometry %>%
-  filter(SPAQEFF=="A" | SPAQEFF=="B")
-
-included_patients <- 
-  update_patient_list(included_patients,
-                      "A or B effort", all_spirometry %>% count(seqn) %>% nrow())
-
-# Exclude post bronchodilator curves for now
+# Exclude post-bronchodilator curves - these are obtained under specific
+# diagnostic contexts and may bias our model in unexpected ways. Note - it may
+# seem non-intuitive that this would reduce the n since no patients have ONLY
+# post-bronchodilator curves, however patients who are dropped at this step may
+# have had pre-bronchodilator curves that were already filtered for other
+# quality reasons
 
 all_spirometry <-
   all_spirometry %>%
   filter(SPATTYPE=="Pre")
 
-# Note - it may seem non-intuitive that this would reduce the n, however
-# patients who are dropped at this step had pre-bronchodilator curves that were
-# already filtered for other quality reasons
 included_patients <- 
   update_patient_list(included_patients,
                       "exclude BD testing", all_spirometry %>% count(seqn) %>% nrow())
 
-# For simplicity and to avoid accounting for clustering in analyses, will limit to
-# one curve per patient. Will choose patient's "best" curve based on criteria:
-# 1. A effort if available
-# 2. Plateau achieved if available
-# 3. Length closer to median length
-
-median_length <- median(all_spirometry$SPXPTS)
-
-all_spirometry <-
-  all_spirometry %>% 
-  mutate(order_by_length = abs(SPXPTS - median_length)) %>%
-  mutate(order_by_effort = case_when(
-    SPAQEFF=="A" ~ 0,
-    SPAQEFF=="B" ~ 1
-  )) %>%
-  mutate(order_by_plateau = case_when(
-    SPAPLAT=="Y" ~ 0,
-    SPAPLAT=="N" ~ 1
-  )) %>%
-  arrange(seqn,order_by_effort, order_by_plateau, order_by_length) %>%
+# Limit to one curve per patient chosen at random to prevent data leakage
+all_spirometry <- all_spirometry %>%
   group_by(seqn) %>%
-  filter(row_number()==1) %>%
-  select(-order_by_effort, -order_by_plateau, -order_by_length) %>%
+  slice_sample(n = 1) %>%
   ungroup()
 
-```
-
-```{r}
-# Prep data for export to Python
-
-all_spirometry %>%
-  select(seqn, SPXRAW, gender) %>%
-  write_csv(here::here("data/complete_data.csv"))
-
-all_spirometry %>%
+# Save data to CSV for import into deep learning model
+regression_data <-
+  all_spirometry %>%
+  left_join(all_pft, by = "seqn") %>%
   left_join(all_mcq, by = "seqn") %>%
-  filter(ever_asthma==1 | ever_asthma==2) %>%
-  write_csv(here::here("data/complete_asthma.csv"))
-
-# File for VAE to include:
-# Age, months
-# Gender
-# Height
-# FEV1
-# FVC
-# Raw spiro
-
-all_spirometry %>%
-  left_join(all_pft, by = "seqn") %>%
-  left_join(all_bm, by = "seqn") %>%
-  select(seqn, SPXRAW, age_months, gender,
-         ht, fev1, fvc) %>%
-  filter(if_all(everything(), ~ !is.na(.))) %>%
-  write_csv(here::here("data/complete_vae.csv"))
-
-# File for VAE to include:
-# FEV1, FVC, FEV1/FVC, FEF25-75, PEF
-
-vae_data <-
-  all_spirometry %>%
-  left_join(all_pft, by = "seqn") %>%
-  select(seqn, SPXRAW, fev1, fvc, f_ratio, fef257, pef) %>%
-  drop_na() %>%
-  write_csv(here::here("data/complete_vae_pft.csv"))
-
-# File for resnet regression
-
-resnet_regression_data <-
-  all_spirometry %>%
-  left_join(all_pft, by = "seqn") %>%
-  left_join(all_cbc, by = "seqn") %>%
-  select(seqn, SPXRAW, aec, fev1, fvc, f_ratio, fef257, pef) %>%
-  drop_na() %>%
-  write_csv(here::here("data/complete_resnet_aec.csv"))
-
-# File for resnet multioutput regression
-
-resnet_regression_data <-
-  all_spirometry %>%
-  left_join(all_pft, by = "seqn") %>%
-  left_join(all_cbc, by = "seqn") %>%
-  left_join(all_feno, by = "seqn") %>%
-  left_join(all_mcq, by = "seqn") %>%
-  left_join(all_mortality, by = "seqn") %>%
-  left_join(all_bm, by = "seqn") %>%
-  rename(feno = ENXMEAN) %>%
-  select(seqn, SPXRAW, aec, feno, ever_asthma, 
+  left_join(all_rh, by = "seqn") %>%
+  left_join(all_demo, by = "seqn") %>%
+  select(seqn, SPXRAW, ever_asthma, 
          still_asthma, asthma_this_year, asthma_ed_this_year,
-         asthma_rx, family_asthma,ever_emphysema, ever_bronchitis,
-         gender, age_months, race, mortstat,
-         ht, wt,
+         asthma_rx, family_asthma, ever_emphysema, ever_bronchitis,
+         gender, age_months, age_years, race,
+         wheeze_bin, wheeze_exercise, wheeze_count,
          fev1, fvc, f_ratio, fef257, pef) %>%
+  mutate(
+    ever_asthma = factor(ever_asthma),
+    asthma_this_year = factor(asthma_this_year),
+    asthma_ed_this_year = factor(asthma_ed_this_year),
+    asthma_rx = factor(asthma_rx),
+    family_asthma = factor(family_asthma),
+    wheeze_bin = factor(wheeze_bin),
+    wheeze_exercise = factor(wheeze_exercise)
+  ) %>%
   drop_na() %>%
-  write_csv(here::here("data/complete_resnet_multi_v2.csv"))
-
-
-resnet_regression_data %>%
-  ggplot(aes(x=fev1, group=factor(ever_asthma))) +
-  geom_density(aes(color=factor(ever_asthma)))
+  write_csv(here::here("data/complete_resnet_multi_v256.csv"))
 
 ```
 
-```{r Generate Table 1 description of participants in VAE dataset}
+Now that the data are cleaned and exported, they can be imported into our Python development environment for model development and training. Our deep learning model is a convolutional neural network built on a ResNet-9 architecture using the PyTorch library. It takes as input two channels of 1-dimensional input data -- a flow-time channel, as provided by NHANES, and a volume-time channel, calculated as the cumulative sum of the flow-time data -- and returns as output predictions for a regression or classification task.
 
-# this is a really rough hack job for ATS abstract
-# make it pretty later
+As a proof-of-concept, we choose a clinically-relevant, non-trivial classification task with a label that is available in NHANES: prevalent asthma diagnosis (encoded by "ever_asthma" in our dataset). Recognizing prevalent asthma is clearly clinically relevant, as patients with asthma require monitoring, prevention and treatment for exacerbated disease. It is non-trivial in the sense that asthma is a clinical diagnosis that cannot be ruled either in or out based on spirometry measurements alone (in contrast to, e.g., chronic obstructive pulmonary disease, which requires a spirometry-based threshold). Although spirometry is frequently obtained in the diagnosis of asthma, patients with asthma often have "normal" spirometry based on conventional measurements and may require additional specialized testing (spirometry with bronchodilator or bronchoprovocation testing).
 
-vae_data %>%
-  select(seqn) %>%
-  left_join(all_demo) %>%
-  mutate(age_years = floor(age_years)) %>%
-  count()
+In the Python environment, the exported data are randomly divided into an 80/20 training/validation split. After the model is trained, model output (predictions of prevalent asthma) are exported for the validation samples only and imported back into R for inference.
 
+```{r Regression data}
+# Data are sent to deep learning model
 
-```
+# Load predictions from deep learning model
+# This file contains validation set only - we will use this as source of
+# truth for training/validation split
+dl_outputs <- read_csv(here::here("data/validation_predictions_256_6710.csv"),
+                       show_col_types = FALSE)
 
-```{r}
-# Outcomes I can use PFT measurements to predict
-# 1. Mortality
-# 2. FENO (binary cut off or normalized continuous value)
-# 3. Bronchodilator responsiveness
-# 4. Asthma history
-# 5. AEC count (binary cut off or normalized continuous value)
-
-mu_file_path <- "data/mu_values_model_12.csv"
-
-mu_values <- read_csv(here::here(mu_file_path), show_col_types = FALSE)
-```
-
-```{r Correlation of mu with EDF}
-
-mu_table <-
-  vae_data %>%
-  left_join(mu_values, by = "seqn") %>%
-  select(seqn, fev1, fvc, f_ratio, fef257, pef, any_of(starts_with("mu_"))) %>%
-  drop_na()
-
-mu_table %>%
-  select(any_of(starts_with("mu_")), fev1, fvc, f_ratio, fef257, pef) %>%
-  cov() %>%
-  cov2cor()
-
-```
-
-```{r fafo}
-
-regression_data <- 
-  vae_data %>%
-  left_join(mu_values, by = "seqn") %>%
-  left_join(bd_response, by = "seqn") %>%
-  select(seqn, fev1, fvc, f_ratio, fef257, pef, 
-         bd_response,
-         training_sample,
-         any_of(starts_with("mu_"))) %>%
-  drop_na() %>%
-  mutate(outcome = as.numeric(bd_response))
-
-regression_data_train <-
+# Use dl_outputs to add a column to regression_data indicating
+# training/validation split - this ensures that all of our models are trained
+# on the same training data and validated on the same validation data
+regression_data <-
   regression_data %>%
-  filter(training_sample==1)
-
-regression_data_val <-
-  regression_data %>%
-  filter(training_sample==1)
-
-m0 <-
-  glm(
-    outcome ~ fev1 + fvc + f_ratio + fef257 + pef,
-    data = regression_data_train,
-    family = "binomial"
-  )
-
-m1 <-
-  glm(
-    outcome ~
-      mu_1 + mu_2 + mu_3 + mu_4 + mu_5,
-    data = regression_data_train,
-    family = "binomial"
-  )
-
-m0_predictions <- predict(m0, newdata = regression_data_val, type = "response")
-m0_obs_pred <- tibble(
-  obs = regression_data_val$outcome,
-  pred = m0_predictions
-)
-
-m1_predictions <- predict(m1, newdata = regression_data_val, type = "response")
-m1_obs_pred <- tibble(
-  obs = regression_data_val$outcome,
-  pred = m1_predictions
-)
-
-sbs_m0 <- scaled_brier_score(m0_obs_pred$obs, m0_obs_pred$pred)
-sbs_m1 <- scaled_brier_score(m1_obs_pred$obs, m1_obs_pred$pred)
-
-print(paste0(
-  "Conventional SBS: ", sbs_m0, "; ",
-  "Deep learning SBS: ", sbs_m1, "."
-))
-
-boot_data <- bind_cols(m0_obs_pred, m1_obs_pred,
-                       .name_repair = "universal") %>%
-  rename(obs = obs...1,
-         pred_m0 = pred...2,
-         pred_m1 = pred...4) %>%
-  select(obs, pred_m0, pred_m1)
-
-  # Function to calculate the difference in Brier Scores
-  brier_diff <- function(data, indices) {
-    sampled_data <- data[indices, ]
-    
-    brier_base <- scaled_brier_score(sampled_data$obs, sampled_data$pred_m0)
-    brier_mu <- scaled_brier_score(sampled_data$obs, sampled_data$pred_m1)
-    
-    diff <- brier_mu - brier_base
-    if (is.na(diff)) diff <- 0  # Handle NA gracefully
-    
-    return(diff)
-    
-  }
-  
-  # Bootstrap the Brier Score difference with 1000 replications
-  set.seed(42)
-  boot_result <- boot(boot_data, statistic = brier_diff, R = 1000)
-  
-  # Calculate confidence interval for the difference
-  boot_ci <- boot.ci(boot_result, type = "norm")
-  
-  # Print results
-  print(boot_result)
-  print(boot_ci)
-
-```
-
-```{r}
-
-regression_data <- 
-  vae_data %>%
-  left_join(mu_values, by = "seqn") %>%
-  left_join(all_cbc, by = "seqn") %>%
-  select(seqn, fev1, fvc, f_ratio, fef257, pef, 
-         aec,
-         training_sample,
-         any_of(starts_with("mu_"))) %>%
-  drop_na() %>%
-  rename(outcome = aec)
-
-regression_data_train <-
-  regression_data %>%
-  filter(training_sample==1)
-
-regression_data_val <-
-  regression_data %>%
-  filter(training_sample==1)
-
-m0 <-
-  lm(
-    outcome ~ fev1 + fvc + f_ratio + fef257 + pef,
-    data = regression_data_train
-  )
-
-m1 <-
-  lm(
-    outcome ~
-      mu_1 + mu_2 + mu_3 + mu_4 + mu_5,
-    data = regression_data_train
-  )
-
-m0_predictions <- predict(m0, newdata = regression_data_val)
-m0_obs_pred <- tibble(
-  obs = regression_data_val$outcome,
-  pred = m0_predictions
-)
-
-m1_predictions <- predict(m1, newdata = regression_data_val)
-m1_obs_pred <- tibble(
-  obs = regression_data_val$outcome,
-  pred = m1_predictions
-)
-
-sbs_m0 <- scaled_brier_score(m0_obs_pred$obs, m0_obs_pred$pred)
-sbs_m1 <- scaled_brier_score(m1_obs_pred$obs, m1_obs_pred$pred)
-
-print(paste0(
-  "Conventional SBS: ", sbs_m0, "; ",
-  "Deep learning SBS: ", sbs_m1, "."
-))
-
-boot_data <- bind_cols(m0_obs_pred, m1_obs_pred,
-                       .name_repair = "universal") %>%
-  rename(obs = obs...1,
-         pred_m0 = pred...2,
-         pred_m1 = pred...4) %>%
-  select(obs, pred_m0, pred_m1)
-
-  # Function to calculate the difference in Brier Scores
-  brier_diff <- function(data, indices) {
-    sampled_data <- data[indices, ]
-    
-    brier_base <- scaled_brier_score(sampled_data$obs, sampled_data$pred_m0)
-    brier_mu <- scaled_brier_score(sampled_data$obs, sampled_data$pred_m1)
-    
-    diff <- brier_mu - brier_base
-    if (is.na(diff)) diff <- 0  # Handle NA gracefully
-    
-    return(diff)
-    
-  }
-  
-  # Bootstrap the Brier Score difference with 1000 replications
-  set.seed(42)
-  boot_result <- boot(boot_data, statistic = brier_diff, R = 1000)
-  
-  # Calculate confidence interval for the difference
-  boot_ci <- boot.ci(boot_result, type = "norm")
-  
-  # Print results
-  print(boot_result)
-  print(boot_ci)
-
-```
-
-```{r Mortality}
-
-regression_data <- 
-  vae_data %>%
-  left_join(all_mortality, by = "seqn") %>%
-  left_join(mu_values, by = "seqn") %>%
-  select(seqn, fev1, fvc, f_ratio, fef257, pef, mortstat, mu_1, mu_2) %>%
-  drop_na() %>%
-  mutate(mortstat = factor(mortstat)) %>%
-  mutate(outcome = mortstat)
-
-compare_model_performance(regression_data, "Mortality")
-
-regression_data <- 
-  vae_data %>%
-  left_join(all_mortality, by = "seqn") %>%
-  left_join(mu_values, by = "seqn") %>%
-  select(seqn, fev1, fvc, f_ratio, fef257, pef, mortstat, 
-         any_of(starts_with("mu_"))) %>%
-  drop_na() %>%
-  mutate(mortstat = factor(mortstat)) %>%
-  mutate(outcome = mortstat)
-
-compare_SPINC_performance(regression_data, "Mortality")
-```
-
-```{r FENO}
-
-regression_data <- 
-  vae_data %>%
-  left_join(all_feno, by = "seqn") %>%
-  left_join(mu_values, by = "seqn") %>%
-  mutate(feno_neg = case_when(
-    ENXMEAN < 25 ~ 1,
-    ENXMEAN >= 25 ~ 0
-  )) %>%
-  mutate(feno_neg = factor(feno_neg)) %>%
-  select(seqn, fev1, fvc, f_ratio, fef257, pef,
-         any_of(starts_with("mu_")), feno_neg) %>%
-  drop_na() %>%
-  mutate(outcome = feno_neg)
-
-compare_model_performance(regression_data, "FENO < 25")
-
-compare_SPINC_performance(regression_data, "FENO < 25")
-
-```
-
-```{r Bronchodilator response}
-
-regression_data <- 
-  vae_data %>%
-  left_join(bd_response, by = "seqn") %>%
-  left_join(mu_values, by = "seqn") %>%
-  select(seqn, fev1, fvc, f_ratio, fef257, pef, any_of(starts_with("mu_")), bd_response) %>%
-  mutate(bd_response = factor(bd_response)) %>%
-  drop_na() %>%
-  mutate(outcome = bd_response)
-
-compare_model_performance(regression_data, "Bronchodilator response")
-
-compare_SPINC_performance(regression_data, "Bronchodilator response")
-
-```
-
-```{r Asthma history}
-
-# Ever asthma
-
-regression_data <- 
-  vae_data %>%
-  left_join(all_mcq, by = "seqn") %>%
-  left_join(mu_values, by = "seqn") %>%
-  filter(ever_asthma != 9) %>%
-  mutate(ever_asthma = factor(ever_asthma)) %>%
-  select(seqn, fev1, fvc, f_ratio, fef257, pef, any_of(starts_with("mu_")), ever_asthma) %>%
-  drop_na() %>%
-  mutate(outcome = ever_asthma)
-
-compare_model_performance(regression_data, "Asthma history (ever)")
-
-compare_SPINC_performance(regression_data, "Asthma history (ever)")
-
-regression_data <- 
-  vae_data %>%
-  left_join(all_mcq, by = "seqn") %>%
-  left_join(mu_values, by = "seqn") %>%
-  filter(family_asthma == 1 | family_asthma == 2) %>%
-  mutate(family_asthma = factor(family_asthma)) %>%
-  select(seqn, fev1, fvc, f_ratio, fef257, pef, mu_1, mu_2, family_asthma) %>%
-  drop_na() %>%
-  mutate(outcome = family_asthma)
-
-compare_model_performance(regression_data, "Family asthma history")
-
-regression_data <- 
-  vae_data %>%
-  left_join(all_mcq, by = "seqn") %>%
-  left_join(mu_values, by = "seqn") %>%
-  filter(still_asthma == 1 | still_asthma == 2) %>%
-  mutate(still_asthma = factor(still_asthma)) %>%
-  select(seqn, fev1, fvc, f_ratio, fef257, pef, mu_1, mu_2, still_asthma) %>%
-  drop_na() %>%
-  mutate(outcome = still_asthma)
-
-compare_model_performance(regression_data, "Asthma history (current)")
-
-
-```
-
-```{r COPD}
-
-regression_data <- 
-  vae_data %>%
-  left_join(all_mcq, by = "seqn") %>%
-  left_join(mu_values, by = "seqn") %>%
-  filter(ever_emphysema == 1 | ever_emphysema == 2) %>%
-  mutate(ever_emphysema = factor(ever_emphysema)) %>%
-  select(seqn, fev1, fvc, f_ratio, fef257, pef, any_of(starts_with("mu_")), ever_emphysema) %>%
-  drop_na() %>%
-  mutate(outcome = ever_emphysema)
-
-compare_model_performance(regression_data, "Emphysema history")
-compare_SPINC_performance(regression_data, "Emphysema history")
-
-regression_data <- 
-  vae_data %>%
-  left_join(all_mcq, by = "seqn") %>%
-  left_join(mu_values, by = "seqn") %>%
-  filter(ever_bronchitis == 1 | ever_bronchitis == 2) %>%
-  mutate(ever_bronchitis = factor(ever_bronchitis)) %>%
-  select(seqn, fev1, fvc, f_ratio, fef257, pef, any_of(starts_with("mu_")), ever_bronchitis) %>%
-  drop_na() %>%
-  mutate(outcome = ever_bronchitis)
-
-compare_model_performance(regression_data, "Chronic bronchitis history")
-compare_SPINC_performance(regression_data, "Chronic bronchitis history")
-
-regression_data <- 
-  vae_data %>%
-  left_join(all_mcq, by = "seqn") %>%
-  left_join(mu_values, by = "seqn") %>%
-  mutate(ever_copd = case_when(
-    ever_emphysema == 1 ~ 1,
-    ever_bronchitis == 1 ~ 1,
+  mutate(validation = case_when(
+    seqn %in% dl_outputs$seqn ~ 1,
     .default = 0
-  )) %>%
-  mutate(ever_copd = factor(ever_copd)) %>%
-  select(seqn, fev1, fvc, f_ratio, fef257, pef, any_of(starts_with("mu_")), ever_copd) %>%
-  drop_na() %>%
-  mutate(outcome = ever_copd)
-
-compare_model_performance(regression_data, "COPD history")
-compare_SPINC_performance(regression_data, "COPD history")
-
+  ))
 ```
 
-```{r Absolute eosinophil count}
+Our hypothesis is that deep learning will facilitate better predictive performance for prevalent asthma than conventional PFT measurements. Therefore, for our comparators we develop models that take as input the four most commonly used conventional PFT measurements in the characterization of asthma:
 
-regression_data <- 
-  vae_data %>%
-  left_join(all_cbc, by = "seqn") %>%
-  left_join(mu_values, by = "seqn") %>%
-  mutate(aec_pos = case_when(
-    aec < .200 ~ 1,
-    aec >= .200 ~ 0
-  )) %>%
-  mutate(aec_pos = factor(aec_pos)) %>%
-  drop_na() %>%
-  mutate(outcome = aec_pos)
+1. Forced expiratory volume in 1 second (FEV1), 
+2. Forced vital capacity (FVC), 
+3. Forced mid-expiratory flow (FEF25-75), and
+4. Ratio of FEV1 to FVC (FEV1/FVC). 
 
-compare_model_performance(regression_data, "AEC < 200")
+Using the same 80/20 training/validation split, we develop: 
 
-compare_SPINC_performance(regression_data, "AEC < 200")
+1. Generalized linear model: a logistic regression model with the binary outcome of ever_asthma and one term for each of the four conventional measurements. This model is straightforward and easily interpretable, however, it is possible that it is too inflexible to capture the full clinically-relevant data encoded in the four conventional measurements. Therefore, as a more robust comparator, we also develop:
+2. Generalized additive model (GAM) with cubic splines applied to each conventional measurement. This allows more flexibility, reducing the likelihood that failure to capture variation in prevalent asthma is due to model misspecification.
 
-```
-
-```{r Gender?}
-
-regression_data <- 
-  vae_data %>%
-  left_join(all_demo, by = "seqn") %>%
-  left_join(mu_values, by = "seqn") %>%
-  drop_na() %>%
-  mutate(outcome = gender)
-
-compare_model_performance(regression_data, "Gender")
-
-compare_SPINC_performance(regression_data, "Gender")
-
-```
-
-```{r Race?}
-
-regression_data <- 
-  vae_data %>%
-  left_join(all_demo, by = "seqn") %>%
-  left_join(mu_values, by = "seqn") %>%
-  drop_na() %>%
-  mutate(race_bin = case_when(
-    race==3 ~ "White",
-    .default = "Non-white"
-  )) %>%
-  drop_na() %>%
-  mutate(outcome = factor(race_bin))
-
-compare_model_performance(regression_data, "Non-white")
-compare_SPINC_performance(regression_data, "Non-white")
-
-regression_data <- 
-  vae_data %>%
-  left_join(all_demo, by = "seqn") %>%
-  left_join(mu_values, by = "seqn") %>%
-  drop_na() %>%
-  mutate(race_bin = case_when(
-    race==1 | race==2 ~ "Hispanic",
-    .default = "Non-Hispanic"
-  )) %>%
-  mutate(outcome = factor(race_bin))
-
-compare_model_performance(regression_data, "Non-Hispanic race")
-
-regression_data <- 
-  vae_data %>%
-  left_join(all_demo, by = "seqn") %>%
-  left_join(mu_values, by = "seqn") %>%
-  drop_na() %>%
-  mutate(race_bin = case_when(
-    race==4 ~ "Non-Hispanic Black",
-    .default = "White and/or Hispanic"
-  )) %>%
-  mutate(outcome = factor(race_bin))
-
-compare_model_performance(regression_data, "Non-Hispanic Black")
-
-```
-
-```{r}
-lr_fit <- 
-  lr_spec |>
-  fit(mortstat ~ fev1 + fvc + f_ratio + fef257 + pef, 
-      data = regression_data)
-
-pred0 <- 
-  bind_cols(
-    truth = regression_data$mortstat,
-    predict(lr_fit, regression_data),
-    predict(lr_fit, regression_data, type = "prob")
-  )
-
-auc0 <- roc_auc(pred0, truth, .pred_0)$.estimate
-
-r0 <- 
-  roc_curve(pred0, truth, .pred_0) %>%
-  mutate(group = "base")
-
-autoplot(roc_curve(pred0, truth, .pred_0))
-
-lr_fit_mu <- 
-  lr_spec |>
-  fit(mortstat ~ fev1 + fvc + f_ratio + fef257 + pef +
-        mu_1 + mu_2, 
-      data = regression_data)
-
-pred1 <- 
-  bind_cols(
-    truth = regression_data$mortstat,
-    predict(lr_fit_mu, regression_data),
-    predict(lr_fit_mu, regression_data, type = "prob")
-  )
-
-auc1 <- roc_auc(pred1, truth, .pred_0)$.estimate
-
-r1 <- 
-  roc_curve(pred1, truth, .pred_0) %>%
-  mutate(group = "mu")
-
-auc_labels <- tibble(
-  group = c("mu","base"),
-  auc = c(auc1, auc0),
-  x = c(0.2, 0.2),
-  y = c(1, 0.9)
+```{r Train alternative models}
+# Train GLM on training records only
+m0 <- glm(
+  ever_asthma ~ 
+    fev1 +
+    fvc +
+    f_ratio +
+    fef257,
+  data = filter(regression_data,validation==0),
+  family = "binomial"
 )
 
-bind_rows(r0, r1) %>%
-  ggplot(aes(x = 1 - specificity, y = sensitivity)) +
-  geom_path(aes(color=group)) +
-  geom_abline(lty = 3) +
-  geom_text(data = auc_labels, aes(label = auc, x = x, y = y, color=group)) +
-  coord_equal() +
-  theme_bw()
+# Generate predicted probabilities on validation records only
+preds <- predict.glm(
+  m0, newdata = filter(regression_data,validation==1),
+  type="response"
+) %>% as_tibble_col(column_name = "pred")
 
-autoplot(roc_curve(pred1, truth, .pred_0))
-
-
-
-```
-
-```{r Read in mu values from VAE}
-
-mu_values <- read_csv(here::here("data/mu_values_08.csv"))
-
-mu_table <-
-  mu_values %>%
-  left_join(all_pft, by = "seqn") %>%
-  left_join(all_mcq, by = "seqn") %>%
-  left_join(all_bm, by = "seqn") %>%
-  left_join(all_feno, by = "seqn") %>%
-  select(seqn, mu_1, mu_2, mu_3,
-         SPXNFEV1, SPXNFVC, 
-         SPXNF257,
-         ever_asthma, ht,
-         ENXMEAN) %>%
-  mutate(ever_asthma = case_when(
-    ever_asthma==1 ~ 1,
-    ever_asthma==2 ~ 0
-  )) %>%
+# Format for yardstick
+glm_validation_data <-
+  regression_data %>%
+  filter(validation==1) %>%
+  bind_cols(
+    ., preds
+  ) %>%
   mutate(ever_asthma = factor(ever_asthma)) %>%
-  filter(ever_asthma==0 | ever_asthma==1) %>%
-  filter(!is.na(ENXMEAN)) %>%
-  mutate(feno = case_when(
-    ENXMEAN >= 25 ~ 1,
-    ENXMEAN < 25 ~ 0
-  )) %>%
-  rename(fev1 = SPXNFEV1,
-         fvc = SPXNFVC,
-         fef257 = SPXNF257) %>%
-  left_join(all_demo, by = "seqn") %>%
-  left_join(all_mortality, by = "seqn") %>%
-  mutate(race = factor(race),
-         gender = factor(gender),
-         mortstat = factor(mortstat),
-         feno = factor(feno)) %>%
-  filter(!is.na(mortstat)) %>%
-  mutate(f_ratio = fev1/fvc)
+  mutate(group = "glm") %>%
+  select(seqn, ever_asthma, pred, group)
 
-set.seed(42)
-mu_table <- mu_table %>%
-  mutate(assignment = rbinom(nrow(mu_table),1,0.8))
+# Train GAM on training records only
+m0 <- gam(
+  ever_asthma ~ 
+    s(fev1,bs="cr") + 
+    s(fvc,bs="cr") + 
+    s(f_ratio,bs="cr") + 
+    s(fef257,bs="cr"),
+  data = filter(regression_data,validation==0),
+  family = "binomial"
+)
 
-mu_table %>%
-  select(mu_1, mu_2, mu_3, fev1, fvc) %>%
-  cov() %>%
-  cov2cor()
+# Generate predicted probabilities on validation records only
+preds <- predict.gam(
+  m0, newdata = filter(regression_data,validation==1),
+  type="response"
+) %>% as_tibble_col(column_name = "pred")
 
-train_data <- filter(mu_table, assignment==1)
-val_data <- filter(mu_table, assignment==0)
-
-# m0 <- gam(mortstat ~ s(fev1, bs="cr") + s(fvc, bs="cr") +
-#             s(age_months, bs="cr") + s(f_ratio, bs="cr") +
-#             s(ht, bs="cr"),
-#           data = train_data,
-#           family = "binomial")
-
-m0 <- gam(mortstat ~ fev1 + fvc + f_ratio + fef257,
-          data = train_data,
-          family = "binomial")
-
-summary(m0)
-
-m1 <- gam(mortstat ~ 
-            fev1 
-          + fvc 
-          + f_ratio 
-          + fef257
-            + mu_1
-            + mu_2
-            + mu_3
-          ,
-          data = train_data,
-          family = "binomial")
-
-summary(m1)
-
-m0_predictions <- 
-  predict.gam(
-    m0,
-    newdata = val_data,
-    type = "response"
+# Format for yardstick
+gam_validation_data <-
+  regression_data %>%
+  filter(validation==1) %>%
+  bind_cols(
+    ., preds
   ) %>%
-  tibble()
-
-m0_predictions <-
-  bind_cols(m0_predictions, val_data) %>%
-  rename_with(~ "prediction", 1) %>%
-  filter(!is.na(mortstat) & !is.na(prediction)) %>%
-  mutate(mortstat = factor(mortstat))
-
-m1_predictions <- 
-  predict.gam(
-    m1,
-    newdata = val_data,
-    type = "response"
-  ) %>%
-  tibble()
-
-m1_predictions <-
-  bind_cols(m1_predictions, val_data) %>%
-  rename_with(~ "prediction", 1) %>%
-  filter(!is.na(mortstat) & !is.na(prediction)) %>%
-  mutate(mortstat = factor(mortstat))
-
-# ROC
-myRoc_base <- roc(response=m0_predictions$mortstat,
-    predictor=m0_predictions$prediction)
-
-myRoc_vae <- roc(response=m1_predictions$mortstat,
-    predictor=m1_predictions$prediction)
-
-plot(myRoc_vae, col="blue")
-plot(myRoc_base, col="red", add=TRUE)
-
-roc.test(myRoc_base, myRoc_vae)
-
+  mutate(ever_asthma = factor(ever_asthma)) %>%
+  mutate(group = "gam") %>%
+  select(seqn, ever_asthma, pred, group)
 ```
 
-```{r Regression modeling}
+Finally, we format the predictions from our deep learning model similarly in preparation to use the yardstick package for model evaluation.
 
-regression_data <- 
-  all_spirometry %>% left_join(all_pft, by = "seqn") %>%
-  left_join(all_mortality, by = "seqn") %>%
-  select(seqn, gender, age_months, SPXNFEV1, SPXNFVC, SPXNF257, race,
-         mortstat) %>%
-  rename(fev1 = SPXNFEV1,
-         fvc = SPXNFVC,
-         fef257 = SPXNF257) %>%
-  mutate(race = factor(race)) %>%
-  mutate(gender = case_when(
-    gender==1 ~ 0,
-    gender==2 ~ 1
-  )) %>%
-  mutate(gender = factor(gender)) %>%
-  mutate(mortstat = factor(mortstat))
+```{r Prepare deep learning data}
+# Format DL predictions for yardstick
+dl_validation_data <-
+  dl_outputs %>%
+  rename(pred = classification_3_probs) %>%
+  left_join(regression_data, by = "seqn") %>%
+  select(seqn, ever_asthma, pred) %>%
+  mutate(group = "dl") %>%
+  mutate(ever_asthma = factor(ever_asthma))
+```
 
-regression_data <- regression_data %>%
-  mutate(assignment = rbinom(nrow(regression_data),1,0.8))
 
-train_data <- filter(regression_data, assignment==1)
-val_data <- filter(regression_data, assignment==0)
+```{r Combine model validation data}
 
-m0 <- gam(gender ~ s(fev1, bs="cr") + s(fvc, bs="cr") +
-            s(age_months, bs="cr"),
-          data = train_data,
-          family = "binomial")
-
-summary(m0)
-
-predictions <- 
-  predict.gam(
-    m0,
-    newdata = val_data,
-    type = "response"
-  ) %>%
-  tibble()
-
-predictions <-
-  bind_cols(predictions, val_data) %>%
-  rename_with(~ "prediction", 1) %>%
-  mutate(prediction = case_when(
-    prediction > 0.5 ~ "1",
-    prediction <= 0.5 ~ "0"
-  )) %>%
-  filter(!is.na(gender) & !is.na(prediction)) %>%
-  mutate(accurate = gender==prediction)
-
-predictions %>%
-  summarise(sum(accurate)/n())
+combined_validation_data <-
+  bind_rows(gam_validation_data, glm_validation_data, dl_validation_data)
 
 ```
 
 ## Results {#sec-results}
 
-Describe your results and include relevant tables, plots, and code/comments used to obtain them. You may refer to the @sec-methods as needed. End with a brief conclusion of your findings related to the question you set out to address. You can include references if you'd like, but this is not required.
+```{r Create Table 1}
+
+vars = c("gender", "age_years", "race", "ever_asthma", "asthma_rx", "family_asthma",
+         "wheeze_bin", "wheeze_exercise",
+         "fev1", "fvc", "f_ratio", "fef257")
+
+tableOne <- CreateTableOne(vars = vars, data = regression_data)
+
+print(tableOne)
+
+```
+Our combined cohort (training and validation) includes 9,841 adult patients with mean age 44.71 (SD 17.47). Our cohort reflects the weighted-sample demographics of NHANES, with 49.8% female subjects, 19.9% non-Hispanic Black and 45.2% non-Hispanic white participants. Of note, we do not apply NHANES demographic sampling weights to our analysis as it is not performed for descriptive epidemiologic purposes. In this cohort, 13.6% of participants reported prevalent asthma (a diagnosis of asthma ever prior to NHANES inclusion), 4.8% a current prescription for asthma treatment, 20.4% a family history of asthma, 13.0% a history of wheezing, and 5.9% wheezing with exercise. FEV1, FVC, and FEF257 are reported in mL and reflect typical population distributions.
+
+```{r}
+# Calculate AUROC values
+combined_validation_data %>%
+  group_by(group) %>%
+  roc_auc(
+    truth = ever_asthma,
+    pred,
+    event_level = "second" 
+  )
+```
+
+Comparing absolute AUROC values, we find that the models trained on conventional PFT measurements have some discriminative capability, but it is relatively poor, consistent with what we know about how asthma diagnoses are made clinically. Unsurprisingly, the more flexible GAM performs slightly better with an AUROC of 0.62 as compared to the GLM's AUROC of 0.61. Our deep learning model performs considerably better, achieving an AUROC of 0.67. We can visualize this graphically as well:
+
+```{r}
+# Generate ROC curve figure
+combined_validation_data %>%
+  group_by(group) %>%
+  roc_curve(
+    truth = ever_asthma,
+    pred,
+    event_level = "second"
+  ) %>%
+  ggplot(aes(x = 1 - specificity, y = sensitivity, group = group)) +
+  geom_path(aes(color = group)) +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  theme_bw() +
+  scale_colour_jama(
+    name = "Model",
+    limits = c("dl",
+               "gam",
+               "glm"),
+    labels = c("DL","GAM","GLM")
+  ) +
+  ggtitle("ROC curve for prevalent asthma")
+```
+Thus, we demonstrate that applying deep learning to raw spirometry data markedly improves discrimination for the task of identifying prevalent asthma over the use of discrete, conventional PFT measurements.
 
 ## Conclusion
 
-This the conclusion. The @sec-results can be invoked here.
+In this small, proof-of-concept design we demonstrate the opportunity to unlock clinically-relevant data concerning pulmonary disease by applying deep learning to raw spirometry data, with value over-and-above what is currently available through the use of conventional PFT measurements. Given NHANES's relatively small cohort size and coarse associated data -- notably lacking longitudinal or follow up data -- we consider these results to be a pessimistic reflection of what is possible when deep learning is applied to a richer, more clinically-oriented dataset. Future work will externally validate these results in other cohorts and develop more clinically-relevant models by incorporating longitudinal patient data from the electronic health record (e.g., predicting asthma exacerbation requiring hospital admission).
